@@ -9,3 +9,5 @@ Cargo.lock
 *.iml
 .env
 /tmp/
+*.nsec
+*.key
