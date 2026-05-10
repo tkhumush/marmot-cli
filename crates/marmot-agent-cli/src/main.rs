@@ -356,10 +356,14 @@ async fn main() {
             println!("JSON-RPC methods available: ping, identity_npub, list_groups, send_message");
             println!("Press Ctrl+C to stop.");
 
-            if let Err(e) = marmot_agent_rpc::server::serve_tcp_blocking(&listen,
-                handler,
-            ) {
-                eprintln!("Daemon error: {}", e);
+            match tokio::task::spawn_blocking(move || {
+                marmot_agent_rpc::server::serve_tcp_blocking(&listen, handler)
+            })
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => eprintln!("Daemon error: {e}"),
+                Err(e) => eprintln!("Daemon task panicked: {e}"),
             }
         }
         Commands::Groups { action } => match action {
