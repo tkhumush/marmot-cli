@@ -199,38 +199,26 @@ impl AgentContext {
         Ok(event)
     }
 
-    /// Collect all events from an UpdateGroupResult that need publishing.
-    ///
-    /// Returns a Vec of (label, Event) tuples suitable for `relay::publish_events`.
-    /// Labels help trace which event failed in the relay publish result.
-    pub fn prepare_group_update_events(
+    /// Return the evolution commit event from an UpdateGroupResult, ready to publish.
+    pub fn evolution_event(result: &mdk_core::groups::UpdateGroupResult) -> &Event {
+        &result.evolution_event
+    }
+
+    /// NIP-59 gift-wrap a single welcome rumor for a recipient.
+    /// The resulting kind-1059 event is what gets published to relays.
+    pub async fn gift_wrap_welcome(
         &self,
-        result: &mdk_core::groups::UpdateGroupResult,
-    ) -> Result<Vec<(&str, Event)>> {
-        let mut events = Vec::with_capacity(
-            1 + result.welcome_rumors.as_ref().map(|w| w.len()).unwrap_or(0),
-        );
-
-        // The evolution event is already signed
-        events.push(("evolution_commit", result.evolution_event.clone()));
-
-        // Welcome rumors need signing
-        if let Some(ref rumors) = result.welcome_rumors {
-            for (i, rumor) in rumors.iter().enumerate() {
-                let event = rumor
-                    .clone()
-                    .sign_with_keys(&self.identity.keys)
-                    .map_err(|e| {
-                        crate::Error::Identity(format!(
-                            "failed to sign welcome rumor {}: {}",
-                            i, e
-                        ))
-                    })?;
-                events.push(("welcome", event));
-            }
-        }
-
-        Ok(events)
+        rumor: UnsignedEvent,
+        recipient: &PublicKey,
+    ) -> Result<Event> {
+        nostr::event::builder::EventBuilder::gift_wrap(
+            &self.identity.keys,
+            recipient,
+            rumor,
+            [],
+        )
+        .await
+        .map_err(|e| crate::Error::Group(format!("gift_wrap failed: {}", e)))
     }
 
     /// Process an incoming encrypted Nostr event (kind 445 / commit / proposal).

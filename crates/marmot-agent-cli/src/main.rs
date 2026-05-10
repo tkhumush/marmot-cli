@@ -434,55 +434,10 @@ async fn main() {
                         println!("  Nostr group ID: {}", hex::encode(result.group.nostr_group_id));
 
                         if publish {
-                            let mut events_to_publish: Vec<(&str, Event)> = Vec::new();
-
-                            // Sign any welcome rumors
-                            for (i, rumor) in result.welcome_rumors.iter().enumerate() {
-                                let event = match rumor
-                                    .clone()
-                                    .sign_with_keys(&ctx.identity.keys)
-                                {
-                                    Ok(e) => e,
-                                    Err(e) => {
-                                        eprintln!("Failed to sign welcome rumor {}: {}", i, e);
-                                        continue;
-                                    }
-                                };
-                                events_to_publish.push(("welcome", event));
-                            }
-
-                            if !events_to_publish.is_empty() {
-                                println!("  Publishing welcome events to relays...");
-                                let refs: Vec<(&str, &Event)> = events_to_publish
-                                    .iter()
-                                    .map(|(label, ev)| (*label, ev))
-                                    .collect();
-
-                                let results = match marmot_agent_core::relay::publish_events(
-                                    &refs,
-                                    &marmot_agent_core::relay::DEFAULT_RELAYS,
-                                ).await {
-                                    Ok(r) => r,
-                                    Err(e) => {
-                                        eprintln!("Publish failed: {}", e);
-                                        return;
-                                    }
-                                };
-
-                                println!("  Publish results:");
-                                for (label, relay_results) in results {
-                                    let ok_count = relay_results.iter().filter(|(_, ok)| *ok).count();
-                                    println!("    {}: {}/{} relays OK", label, ok_count, relay_results.len());
-                                    for (url, ok) in relay_results {
-                                        let status = if ok { "OK" } else { "FAIL" };
-                                        println!("      {} {}", status, url);
-                                    }
-                                }
-                            } else {
-                                println!("  No welcome events to publish (group has no initial members).");
-                            }
+                            println!("  No welcome events to publish (group has no initial members).");
+                            println!("  Use 'groups invite --group <nostr-id> --member <npub> --publish' to add members.");
                         } else {
-                            println!("  NOTE: Use --publish to send welcome events to relays.");
+                            println!("  NOTE: Use --publish to confirm. Add members with 'groups invite'.");
                         }
                     }
                     Err(e) => eprintln!("Group creation failed: {}", e),
@@ -529,19 +484,38 @@ async fn main() {
 
                 if publish {
                     println!("\n  Publishing events to relays...");
-                    let to_publish = match ctx.prepare_group_update_events(&result) {
-                        Ok(e) => e,
-                        Err(e) => { eprintln!("Failed to prepare events: {e}"); return; }
-                    };
-                    let refs: Vec<(&str, &Event)> = to_publish.iter().map(|(l, e)| (*l, e)).collect();
-                    match marmot_agent_core::relay::publish_events(&refs, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
+                    let commit_ev = marmot_agent_core::context::AgentContext::evolution_event(&result);
+                    match marmot_agent_core::relay::publish_events(
+                        &[("evolution_commit", commit_ev)],
+                        &marmot_agent_core::relay::DEFAULT_RELAYS,
+                    ).await {
                         Ok(results) => {
                             for (label, relay_results) in results {
                                 let ok = relay_results.iter().filter(|(_, ok)| *ok).count();
                                 println!("    {}: {}/{} relays OK", label, ok, relay_results.len());
                             }
                         }
-                        Err(e) => eprintln!("Publish failed: {e}"),
+                        Err(e) => eprintln!("Publish commit failed: {e}"),
+                    }
+
+                    if let Some(rumors) = result.welcome_rumors {
+                        for rumor in rumors {
+                            match ctx.gift_wrap_welcome(rumor, &member_pk).await {
+                                Ok(gift_wrap) => {
+                                    match marmot_agent_core::relay::publish_event(
+                                        &gift_wrap,
+                                        &marmot_agent_core::relay::DEFAULT_RELAYS,
+                                    ).await {
+                                        Ok(r) => {
+                                            let ok = r.iter().filter(|(_, ok)| *ok).count();
+                                            println!("    welcome (gift wrap): {}/{} relays OK", ok, r.len());
+                                        }
+                                        Err(e) => eprintln!("Publish welcome failed: {e}"),
+                                    }
+                                }
+                                Err(e) => eprintln!("Gift-wrap welcome failed: {e}"),
+                            }
+                        }
                     }
                 } else {
                     println!("  NOTE: Use --publish to send commit + welcome events to relays.");
@@ -671,13 +645,9 @@ async fn main() {
                             println!("  Self-update commit: {}", result.evolution_event.id);
 
                             if publish {
-                                let to_publish = match ctx.prepare_group_update_events(&result) {
-                                    Ok(e) => e,
-                                    Err(e) => { eprintln!("  Failed to prepare events: {e}"); continue; }
-                                };
-                                let refs: Vec<(&str, &Event)> = to_publish.iter().map(|(l, e)| (*l, e)).collect();
+                                let ev = marmot_agent_core::context::AgentContext::evolution_event(&result);
                                 match marmot_agent_core::relay::publish_events(
-                                    &refs,
+                                    &[("evolution_commit", ev)],
                                     &marmot_agent_core::relay::DEFAULT_RELAYS,
                                 ).await {
                                     Ok(results) => {
@@ -748,36 +718,40 @@ async fn main() {
 
                 if publish {
                     println!("\n  Publishing events to relays...");
-                    let to_publish = match ctx.prepare_group_update_events(&result) {
-                        Ok(e) => e,
-                        Err(e) => {
-                            eprintln!("Failed to prepare events for publishing: {}", e);
-                            return;
-                        }
-                    };
 
-                    let refs: Vec<(&str, &Event)> = to_publish.iter()
-                        .map(|(label, ev)| (*label, ev))
-                        .collect();
-
-                    let results = match marmot_agent_core::relay::publish_events(
-                        &refs,
+                    // Publish the MLS commit event
+                    let commit_ev = marmot_agent_core::context::AgentContext::evolution_event(&result);
+                    match marmot_agent_core::relay::publish_events(
+                        &[("evolution_commit", commit_ev)],
                         &marmot_agent_core::relay::DEFAULT_RELAYS,
                     ).await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            eprintln!("Publish failed: {}", e);
-                            return;
+                        Ok(results) => {
+                            for (label, relay_results) in results {
+                                let ok = relay_results.iter().filter(|(_, ok)| *ok).count();
+                                println!("    {}: {}/{} relays OK", label, ok, relay_results.len());
+                            }
                         }
-                    };
+                        Err(e) => eprintln!("Publish commit failed: {}", e),
+                    }
 
-                    println!("  Publish results:");
-                    for (label, relay_results) in results {
-                        let ok_count = relay_results.iter().filter(|(_, ok)| *ok).count();
-                        println!("    {}: {}/{} relays OK", label, ok_count, relay_results.len());
-                        for (url, ok) in relay_results {
-                            let status = if ok { "OK" } else { "FAIL" };
-                            println!("      {} {}", status, url);
+                    // Gift-wrap each welcome rumor for the recipient (NIP-59 kind 1059)
+                    if let Some(rumors) = result.welcome_rumors {
+                        for rumor in rumors {
+                            match ctx.gift_wrap_welcome(rumor, &recipient_pk).await {
+                                Ok(gift_wrap) => {
+                                    match marmot_agent_core::relay::publish_event(
+                                        &gift_wrap,
+                                        &marmot_agent_core::relay::DEFAULT_RELAYS,
+                                    ).await {
+                                        Ok(r) => {
+                                            let ok = r.iter().filter(|(_, ok)| *ok).count();
+                                            println!("    welcome (gift wrap): {}/{} relays OK", ok, r.len());
+                                        }
+                                        Err(e) => eprintln!("Publish welcome failed: {}", e),
+                                    }
+                                }
+                                Err(e) => eprintln!("Gift-wrap welcome failed: {}", e),
+                            }
                         }
                     }
                 } else {
