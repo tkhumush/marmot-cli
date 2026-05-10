@@ -90,8 +90,6 @@ pub async fn publish_events<'a>(
     let mut all_results = Vec::new();
 
     for (label, event) in events {
-        // The label here is used for traceability in logs.
-        let _label = label; // prefix: label string
         match pool.send_event(event).await {
             Ok(_) => {
                 info!("{} published: {}", label, event.id);
