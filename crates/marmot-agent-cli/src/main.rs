@@ -392,7 +392,7 @@ async fn main() {
                             println!("Groups:");
                             for g in groups {
                                 let name = if g.name.is_empty() { "unnamed" } else { &g.name };
-                                println!("  Group '{}' (id: {:?})", name, g.mls_group_id);
+                                println!("  Group '{}' (id: {})", name, hex::encode(g.mls_group_id.as_slice()));
                             }
                         }
                     }
@@ -428,7 +428,7 @@ async fn main() {
                 match ctx.create_group(&name, relays) {
                     Ok(result) => {
                         println!("Group '{}' created!", name);
-                        println!("  MLS group ID: {:?}", result.group.mls_group_id);
+                        println!("  MLS group ID: {}", hex::encode(result.group.mls_group_id.as_slice()));
 
                         if publish {
                             let mut events_to_publish: Vec<(&str, Event)> = Vec::new();
@@ -621,7 +621,7 @@ async fn main() {
                             println!("Conversations:");
                             for g in groups {
                                 let name = if g.name.is_empty() { "unnamed" } else { &g.name };
-                                println!("  '{}' (id: {:?})", name, g.mls_group_id);
+                                println!("  '{}' (id: {})", name, hex::encode(g.mls_group_id.as_slice()));
                             }
                         }
                     }
