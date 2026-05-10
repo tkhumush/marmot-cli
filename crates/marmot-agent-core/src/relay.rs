@@ -1,5 +1,7 @@
-use nostr::{Alphabet, Event, Filter, Kind, PublicKey, RelayUrl, SingleLetterTag};
+use nostr::{Alphabet, Event, Filter, Keys, Kind, PublicKey, RelayUrl, SingleLetterTag};
 use nostr_relay_pool::{relay::ReqExitPolicy, RelayPool, RelayOptions};
+use nostr_relay_pool::pool::RelayPoolBuilder;
+use std::sync::Arc;
 use tracing::{info, warn};
 
 /// Fetch raw events matching an arbitrary filter. For diagnostics only.
@@ -40,6 +42,49 @@ pub const DEFAULT_RELAYS: [&str; 3] = [
     "wss://relay.primal.net",
     "wss://relay.damus.io",
 ];
+
+/// Publish a gift-wrap (kind 1059) to a recipient's inbox relays with NIP-42 auth.
+/// Falls back to `default_relays` if inbox relays are unreachable.
+pub async fn publish_gift_wrap(
+    event: &Event,
+    inbox_relays: &[String],
+    fallback_relays: &[&str],
+    signer: &Keys,
+) -> Result<Vec<(String, bool)>> {
+    // Try inbox relays first with NIP-42 auth.
+    if !inbox_relays.is_empty() {
+        let mut builder = RelayPoolBuilder::default();
+        builder.__signer = Some(Arc::new(signer.clone()));
+        let pool = builder.build();
+        let mut any_added = false;
+        for url in inbox_relays {
+            if let Ok(relay_url) = RelayUrl::parse(url) {
+                if pool.add_relay(relay_url, RelayOptions::default()).await.is_ok() {
+                    any_added = true;
+                }
+            }
+        }
+        if any_added {
+            pool.connect().await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            match pool.send_event(event).await {
+                Ok(_) => {
+                    info!("gift-wrap published to inbox relays: {}", event.id);
+                    let results = inbox_relays.iter().map(|u| (u.clone(), true)).collect();
+                    pool.disconnect().await;
+                    return Ok(results);
+                }
+                Err(e) => {
+                    warn!("gift-wrap inbox publish failed ({}), falling back", e);
+                }
+            }
+            pool.disconnect().await;
+        }
+    }
+
+    // Fallback to default relays without auth.
+    publish_event(event, fallback_relays).await
+}
 
 /// Publish a single Nostr event to a set of relays via RelayPool.
 pub async fn publish_event(
@@ -229,6 +274,38 @@ pub async fn fetch_group_events(
     all_events.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
     Ok(all_events)
+}
+
+/// Fetch a user's NIP-17 inbox relay list (kind 10050).
+/// Returns the relay URLs from `relay` tags, or an empty vec if none found.
+pub async fn fetch_inbox_relays(pubkey: PublicKey, search_relays: &[&str]) -> Vec<String> {
+    let pool = RelayPool::default();
+    for url in search_relays {
+        if let Ok(relay_url) = RelayUrl::parse(url) {
+            let _ = pool.add_relay(relay_url, RelayOptions::default()).await;
+        }
+    }
+    pool.connect().await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let filter = Filter::new().kind(Kind::Custom(10050)).author(pubkey).limit(1);
+    let events = pool
+        .fetch_events(vec![filter], std::time::Duration::from_secs(5), ReqExitPolicy::ExitOnEOSE)
+        .await
+        .unwrap_or_default();
+    pool.disconnect().await;
+
+    events
+        .into_iter()
+        .next()
+        .map(|e| {
+            e.tags
+                .iter()
+                .filter(|t| t.kind() == nostr::TagKind::Relay)
+                .filter_map(|t| t.content().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Fetch gift-wrap events (kind 1059) addressed to `pubkey` from relays.

@@ -504,12 +504,25 @@ async fn main() {
                     }
 
                     if let Some(rumors) = result.welcome_rumors {
+                        let inbox = marmot_agent_core::relay::fetch_inbox_relays(
+                            member_pk,
+                            &marmot_agent_core::relay::DEFAULT_RELAYS,
+                        ).await;
+                        let welcome_relay_strings: Vec<String> = if inbox.is_empty() {
+                            marmot_agent_core::relay::DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect()
+                        } else {
+                            println!("    member inbox relays: {:?}", inbox);
+                            inbox
+                        };
+                        let welcome_relays: Vec<&str> = welcome_relay_strings.iter().map(|s| s.as_str()).collect();
                         for rumor in rumors {
                             match ctx.gift_wrap_welcome(rumor, &member_pk).await {
                                 Ok(gift_wrap) => {
-                                    match marmot_agent_core::relay::publish_event(
+                                    match marmot_agent_core::relay::publish_gift_wrap(
                                         &gift_wrap,
+                                        &welcome_relay_strings,
                                         &marmot_agent_core::relay::DEFAULT_RELAYS,
+                                        &ctx.identity.keys,
                                     ).await {
                                         Ok(r) => {
                                             let ok = r.iter().filter(|(_, ok)| *ok).count();
@@ -722,14 +735,31 @@ async fn main() {
                         Err(e) => eprintln!("Publish commit failed: {}", e),
                     }
 
-                    // Gift-wrap each welcome rumor for the recipient (NIP-59 kind 1059)
+                    // Gift-wrap each welcome rumor for the recipient (NIP-59 kind 1059).
+                    // Per MIP-02, welcome events MUST be delivered to the recipient's
+                    // inbox relays (kind 10050), not our default relays.
                     if let Some(rumors) = result.welcome_rumors {
+                        let inbox = marmot_agent_core::relay::fetch_inbox_relays(
+                            recipient_pk,
+                            &marmot_agent_core::relay::DEFAULT_RELAYS,
+                        ).await;
+                        let welcome_relay_strings: Vec<String> = if inbox.is_empty() {
+                            println!("    (no kind:10050 inbox relays found — falling back to default relays)");
+                            marmot_agent_core::relay::DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect()
+                        } else {
+                            println!("    recipient inbox relays: {:?}", inbox);
+                            inbox
+                        };
+                        let welcome_relays: Vec<&str> = welcome_relay_strings.iter().map(|s| s.as_str()).collect();
+
                         for rumor in rumors {
                             match ctx.gift_wrap_welcome(rumor, &recipient_pk).await {
                                 Ok(gift_wrap) => {
-                                    match marmot_agent_core::relay::publish_event(
+                                    match marmot_agent_core::relay::publish_gift_wrap(
                                         &gift_wrap,
+                                        &welcome_relay_strings,
                                         &marmot_agent_core::relay::DEFAULT_RELAYS,
+                                        &ctx.identity.keys,
                                     ).await {
                                         Ok(r) => {
                                             let ok = r.iter().filter(|(_, ok)| *ok).count();
@@ -910,13 +940,27 @@ async fn main() {
             }
 
             // Fetch gift-wrap events (kind 1059) addressed to us — these carry welcome invites.
+            // Check both our kind:10050 inbox relays AND default relays.
             let gift_wrap_events = if offline {
                 vec![]
             } else {
                 println!("Checking for group invitations (gift wraps)...");
-                match marmot_agent_core::relay::fetch_gift_wrap_events(
-                    ctx.identity.keys.public_key(),
+                let our_pubkey = ctx.identity.keys.public_key();
+                let inbox = marmot_agent_core::relay::fetch_inbox_relays(
+                    our_pubkey,
                     &marmot_agent_core::relay::DEFAULT_RELAYS,
+                ).await;
+                let mut fetch_relays: Vec<String> = marmot_agent_core::relay::DEFAULT_RELAYS
+                    .iter().map(|s| s.to_string()).collect();
+                for r in &inbox {
+                    if !fetch_relays.contains(r) {
+                        fetch_relays.push(r.clone());
+                    }
+                }
+                let fetch_relay_refs: Vec<&str> = fetch_relays.iter().map(|s| s.as_str()).collect();
+                match marmot_agent_core::relay::fetch_gift_wrap_events(
+                    our_pubkey,
+                    &fetch_relay_refs,
                 ).await {
                     Ok(evs) => {
                         println!("  Fetched {} gift-wrap event(s) from relays.", evs.len());
