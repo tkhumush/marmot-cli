@@ -80,9 +80,15 @@ impl AgentConfig {
             match tokio::fs::read_to_string(&path).await {
                 Ok(contents) => match toml::from_str(&contents) {
                     Ok(cfg) => return cfg,
-                    Err(e) => warn!("invalid config file at {}: {}", path.display(), e),
+                    Err(e) => {
+                        warn!("invalid config file at {}: {}", path.display(), e);
+                        eprintln!("warning: invalid config at {} — using defaults\n  {}", path.display(), e);
+                    }
                 },
-                Err(e) => warn!("could not read config file: {}", e),
+                Err(e) => {
+                    warn!("could not read config file: {}", e);
+                    eprintln!("warning: could not read config — using defaults\n  {}", e);
+                }
             }
         }
         Self {
