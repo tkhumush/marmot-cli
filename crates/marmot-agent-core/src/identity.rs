@@ -57,11 +57,11 @@ impl Identity {
     }
 
     pub fn nsec(&self) -> String {
-        self.keys.secret_key().to_bech32().unwrap_or_default()
+        self.keys.secret_key().to_bech32().expect("valid secret key always encodes to bech32")
     }
-    
+
     pub fn npub(&self) -> String {
-        self.keys.public_key().to_bech32().unwrap_or_default()
+        self.keys.public_key().to_bech32().expect("valid public key always encodes to bech32")
     }
 }
 
