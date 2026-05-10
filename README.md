@@ -140,7 +140,23 @@ marmot-cli relay list   # show default relays
 marmot-cli daemon [--listen 127.0.0.1:9222]
 ```
 
-Starts a JSON-RPC TCP server. Only `ping` is currently implemented. `identity_npub`, `list_groups`, and `send_message` are stubs. Full daemon support is the next development phase.
+Starts a JSON-RPC TCP server (newline-delimited JSON, one object per line).
+
+**Currently live:** `ping`
+
+**Stubs (not yet wired):** `identity_npub`, `list_groups`, `send_message`
+
+**Planned methods:** `receive`, `get_messages`, `dm_create`, `groups_pending`, `groups_join`, `keypackage_publish`
+
+The daemon is the primary integration target for AI agent frameworks (Hermes, OpenClaw, etc.). It keeps a single encrypted `AgentContext` loaded in memory and exposes all messaging operations over TCP — no subprocess overhead per call, no state reload, no relay reconnect. Any language that can open a TCP socket can drive it.
+
+See [`docs/HANDOFF.md`](docs/HANDOFF.md) for the full Phase 6 spec including the complete method table and wire format.
+
+Quick test once the daemon is running:
+```bash
+echo '{"jsonrpc":"2.0","method":"ping","id":1}' | nc 127.0.0.1 9222
+# → {"jsonrpc":"2.0","result":"pong","id":1}
+```
 
 ## Agent Integration (signal-cli style)
 

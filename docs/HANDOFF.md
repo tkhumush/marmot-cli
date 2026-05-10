@@ -36,7 +36,49 @@
 - [ ] `README.md` update with install + usage instructions
 - [ ] Pre-commit hooks or `cargo-deny` for dependency scanning
 
-#### Phase 6 — Integration
+#### Phase 6 — TCP Daemon (JSON-RPC) ← **next priority**
+
+> **Why this matters:** The subprocess model (signal-cli style) works fine for simple scripts, but AI agent frameworks like Hermes and OpenClaw need a persistent, long-running process with a stable interface. The daemon keeps a single `AgentContext` (MDK + identity + SQLite) loaded in memory and exposes all messaging operations over a language-agnostic JSON-RPC TCP interface. Any client — Rust, Python, Go, a shell script — can connect to `127.0.0.1:9222` and drive the full message lifecycle without spawning a new process each time.
+
+**What already exists:**
+- `marmot-agent-rpc/src/server.rs` — synchronous TCP listener (`serve_tcp_blocking`), JSON-RPC 2.0 framing (newline-delimited), one thread per client
+- `marmot-cli daemon [--listen 127.0.0.1:9222]` — starts the server
+- `ping` method — live and working
+- `identity_npub`, `list_groups`, `send_message` — stubs (return placeholder JSON, not wired to `AgentContext`)
+
+**What needs to be built:**
+
+1. **Port the server to async (tokio)** — the current `std::thread` + blocking I/O approach works but won't scale when methods need to await relay operations. Swap `serve_tcp_blocking` for a tokio task per connection.
+
+2. **Thread-safe `AgentContext`** — wrap the context in `Arc<tokio::sync::Mutex<AgentContext>>` and pass it into each handler. All RPC methods share a single loaded instance.
+
+3. **Implement the stub methods**, plus add new ones:
+
+| Method | Params | Returns | Notes |
+|---|---|---|---|
+| `ping` | — | `"pong"` | Already live |
+| `identity_npub` | — | `{ npub, pubkey_hex }` | Stub — wire to `ctx.npub()` |
+| `list_groups` | — | `[{ name, nostr_group_id, epoch, state }]` | Stub — wire to `ctx.list_groups()` |
+| `send_message` | `{ group: hex, content: str }` | `{ event_id }` | Stub — wire to `create_dm_message` + `publish_event` |
+| `receive` | `{ limit?: u32 }` | `{ processed: u32 }` | New — fetch + process group events + gift-wraps |
+| `get_messages` | `{ group: hex, limit?: u32 }` | `[{ sender, content, created_at }]` | New — wire to `get_messages_for_group` |
+| `dm_create` | `{ recipient: npub }` | `{ nostr_group_id }` | New — fetch KP, create group, publish welcome |
+| `groups_pending` | — | `[{ nostr_group_id, sender }]` | New — wire to `list_pending_welcomes` |
+| `groups_join` | — | `{ joined: u32 }` | New — wire to `accept_welcome` for each pending |
+| `keypackage_publish` | — | `{ event_id }` | New — generate + publish kind 30443 |
+
+4. **Background receive loop (optional but recommended)** — a tokio task that polls for new messages every N seconds and stores them, so `get_messages` always returns fresh data without the caller needing to call `receive` first.
+
+5. **OpenClaw / Hermes adapter** — once the daemon is complete, a thin client library (or a shell adapter) wraps the TCP RPC calls to fit the agent framework's tool interface. The daemon is the stable foundation; the adapter is just a mapping layer.
+
+**Wire format** (already implemented in the server):
+```
+→  {"jsonrpc":"2.0","method":"send_message","params":{"group":"<hex>","content":"hello"},"id":1}\n
+←  {"jsonrpc":"2.0","result":{"event_id":"<hex>"},"id":1}\n
+```
+One JSON object per line, newline-terminated. Easy to test with `nc 127.0.0.1 9222`.
+
+#### Phase 7 — Integration
 - [ ] Nix flake or `home-manager` module for dev install
 - [ ] Hermes OpenClaw adapter — JSON-RPC client over TCP connecting to `marmot-cli daemon`
 
