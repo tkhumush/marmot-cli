@@ -12,7 +12,7 @@
 3. **KeyPackage publishing** — `keypackage publish` generates kind 30443 and publishes to 3 default relays.
 4. **KeyPackage show** — `keypackage show` fetches our own KeyPackage from relays and displays event ID + timestamp.
 5. **Group creation** — `groups create --name <X> --publish` creates MLS group; with `--publish` sends welcome events to relays.
-6. **DM creation** — `dm create --recipient <npub> --publish` fetches recipient KeyPackage from relays, creates 2-member MLS group; with `--publish` sends evolution_commit + welcome events.
+6. **DM creation** — `dm create --recipient <npub> --publish` fetches recipient KeyPackage from relays, creates 2-member MLS group **with empty name `""`** (White Noise convention for DMs); with `--publish` sends evolution_commit + welcome events.
 7. **DM sending** — `dm send --group <h-tag-hex> --message <msg> --publish` creates kind 445 encrypted message (inner rumor is kind 9 per MIP-03), resolves `h`-tag to MLS group. With `--publish` sends to relays.
 8. **Groups invite** — `groups invite --group <h-tag> --member <npub> --publish` fetches recipient KeyPackage, calls add_members, optionally publishes commit + welcome.
 9. **Receive** — `receive [--limit N] [--offline]` fetches kind 445/10449/4459 events from all known group h-tags AND kind 1059 gift-wrap events (NIP-59 welcome invitations). Decrypts + stores via MDK.
@@ -42,6 +42,7 @@
 
 ### Design Notes
 - **Nostr group ID vs MLS group ID**: MDK stores both. The `h` tag in published events is the `nostr_group_id` (32-byte hex, from `Group.nostr_group_id: [u8; 32]`), while `mls_group_id` is the raw MLS opaque byte vector (`GroupId`). All CLI `--group` flags take the nostr group ID hex (h-tag), resolved via `find_group_by_nostr_id()`.
+- **DM group name must be `""`**: White Noise uses `name == ""` to infer `GroupType::DirectMessage` (see `infer_group_type_from_group_name` in whitenoise-rs). A non-empty name makes it appear as a named group with admin in the UI. Named groups (`groups create`) use a non-empty name. This is an application-layer convention — MIPs have no `group_type` field.
 - **Relay publish is opt-in** via `--publish` flag. Events are created + persisted locally by default.
 - **No secrets in repo**. Identity `.nsec` files and `db.key` live in `~/.local/share/marmot-cli/` — written with `O_CREAT | mode(0o600)` atomically to avoid TOCTOU.
 - `.gitignore` excludes `*.nsec`, `*.key`, `*.db`, `Cargo.lock`, `/target`.

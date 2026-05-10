@@ -705,7 +705,7 @@ async fn main() {
                     .collect();
 
                 println!("Creating DM group with {}...", recipient);
-                let result = match ctx.create_dm(&format!("dm:{}", recipient), relays, &kp_event) {
+                let result = match ctx.create_dm("", relays, &kp_event) {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!("DM creation failed: {}", e);
@@ -786,7 +786,7 @@ async fn main() {
                         } else {
                             println!("Conversations:");
                             for g in groups {
-                                let name = if g.name.is_empty() { "unnamed" } else { &g.name };
+                                let name = if g.name.is_empty() { "<Direct Message>" } else { &g.name };
                                 println!("  '{}' (nostr-id: {})", name, hex::encode(g.nostr_group_id));
                             }
                         }
@@ -863,10 +863,11 @@ async fn main() {
 
                 match ctx.get_messages_for_group(&target_group.mls_group_id, limit) {
                     Ok(messages) => {
+                        let display_name = if target_group.name.is_empty() { "<Direct Message>" } else { &target_group.name };
                         if messages.is_empty() {
-                            println!("No messages in '{}'. Run 'receive' to fetch from relays.", target_group.name);
+                            println!("No messages in '{}'. Run 'receive' to fetch from relays.", display_name);
                         } else {
-                            println!("Messages in '{}' (newest first):", target_group.name);
+                            println!("Messages in '{}' (newest first):", display_name);
                             for msg in &messages {
                                 let sender = marmot_agent_core::context::AgentContext::member_npub(&msg.pubkey);
                                 println!("  [{}] {}: {}", msg.created_at, &sender[..16], msg.content);
