@@ -649,46 +649,46 @@ async fn main() {
                     }
                 };
 
-                // Parse group ID from hex string
-                let group_id_bytes = match hex::decode(&group) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        eprintln!("Invalid group ID (expected hex): {}", e);
-                        return;
-                    }
-                };
-                let group_id = GroupId::from_slice(&group_id_bytes);
+                match ctx.find_group_by_nostr_id(&group) {
+                    Ok(Some(g)) => {
+                        let group_id_hex = hex::encode(&g.mls_group_id.as_slice());
+                        println!("  Resolved to MLS group: {}", group_id_hex);
+                        match ctx.create_dm_message(&g.mls_group_id, &message) {
+                            Ok(event) => {
+                                println!("Encrypted message created!");
+                                println!("  Event ID: {}", event.id);
+                                println!("  Kind: {}", event.kind);
 
-                match ctx.create_dm_message(&group_id, &message) {
-                    Ok(event) => {
-                        println!("Encrypted message created!");
-                        println!("  Event ID: {}", event.id);
-                        println!("  Kind: {}", event.kind);
+                                if publish {
+                                    println!("  Publishing to relays...");
+                                    let results = match marmot_agent_core::relay::publish_event(
+                                        &event,
+                                        &marmot_agent_core::relay::DEFAULT_RELAYS,
+                                    ).await {
+                                        Ok(r) => r,
+                                        Err(e) => {
+                                            eprintln!("Publish failed: {}", e);
+                                            return;
+                                        }
+                                    };
 
-                        if publish {
-                            println!("  Publishing to relays...");
-                            let results = match marmot_agent_core::relay::publish_event(
-                                &event,
-                                &marmot_agent_core::relay::DEFAULT_RELAYS,
-                            ).await {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    eprintln!("Publish failed: {}", e);
-                                    return;
+                                    let ok_count = results.iter().filter(|(_, ok)| *ok).count();
+                                    println!("  Published: {}/{} relays OK", ok_count, results.len());
+                                    for (url, ok) in results {
+                                        let status = if ok { "OK" } else { "FAIL" };
+                                        println!("    {} {}", status, url);
+                                    }
+                                } else {
+                                    println!("\n  NOTE: Not published. Use --publish to send.");
                                 }
-                            };
-
-                            let ok_count = results.iter().filter(|(_, ok)| *ok).count();
-                            println!("  Published: {}/{} relays OK", ok_count, results.len());
-                            for (url, ok) in results {
-                                let status = if ok { "OK" } else { "FAIL" };
-                                println!("    {} {}", status, url);
                             }
-                        } else {
-                            println!("\n  NOTE: Not published. Use --publish to send.");
+                            Err(e) => eprintln!("Message creation failed: {}", e),
                         }
                     }
-                    Err(e) => eprintln!("Message creation failed: {}", e),
+                    Ok(None) => {
+                        eprintln!("Group with nostr id '{}' not found locally. Run 'dm list' to see available groups.", group);
+                    }
+                    Err(e) => eprintln!("Failed to find group: {}", e),
                 }
             }
         },

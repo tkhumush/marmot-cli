@@ -159,6 +159,25 @@ impl AgentContext {
         Ok(update_result)
     }
 
+    /// Find a group by its Nostr group ID (the 32-byte hex in the `h` tag).
+    pub fn find_group_by_nostr_id(&self,
+        nostr_group_id_hex: &str,
+    ) -> Result<Option<group_types::Group>> {
+        let target_bytes = hex::decode(nostr_group_id_hex).map_err(|e| {
+            crate::Error::Identity(format!("invalid nostr group id hex: {}", e))
+        })?;
+        if target_bytes.len() != 32 {
+            return Err(crate::Error::Identity(
+                "nostr group id must be 32 bytes".to_string(),
+            ));
+        }
+        let mut target: [u8; 32] = [0u8; 32];
+        target.copy_from_slice(&target_bytes);
+
+        let groups = self.list_groups()?;
+        Ok(groups.into_iter().find(|g| g.nostr_group_id == target))
+    }
+
     /// Build an encrypted Direct Message (MLS application message) as a kind 445 Nostr event.
     pub fn create_dm_message(
         &self,
