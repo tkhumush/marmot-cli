@@ -163,6 +163,25 @@ impl AgentContext {
         Ok(update_result)
     }
 
+    /// Find an existing 2-member DM group where the current identity and `peer` are the only members.
+    /// Checks only groups with an empty name (the DM convention). Returns the first match.
+    pub fn find_dm_with_peer(&self, peer: &PublicKey) -> Result<Option<group_types::Group>> {
+        let our_key = self.identity.keys.public_key();
+        let expected: BTreeSet<PublicKey> = [our_key, *peer].into_iter().collect();
+        let groups = self.list_groups()?;
+        for group in groups {
+            if !group.name.is_empty() {
+                continue;
+            }
+            if let Ok(members) = self.get_members_for_group(&group.mls_group_id) {
+                if members == expected {
+                    return Ok(Some(group));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Find a group by its Nostr group ID (the 32-byte hex in the `h` tag).
     pub fn find_group_by_nostr_id(&self,
         nostr_group_id_hex: &str,

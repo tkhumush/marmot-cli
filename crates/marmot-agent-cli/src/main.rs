@@ -683,6 +683,13 @@ async fn main() {
                     }
                 };
 
+                // Reuse an existing DM group if one already exists with this recipient.
+                if let Ok(Some(existing)) = ctx.find_dm_with_peer(&recipient_pk) {
+                    println!("DM with this recipient already exists — reusing it.");
+                    println!("  nostr-id: {}", hex::encode(existing.nostr_group_id));
+                    return;
+                }
+
                 println!("Fetching KeyPackage for {}...", recipient);
                 let kp_event = match marmot_agent_core::relay::fetch_keypackage(
                     recipient_pk,
@@ -786,8 +793,21 @@ async fn main() {
                         } else {
                             println!("Conversations:");
                             for g in groups {
-                                let name = if g.name.is_empty() { "<Direct Message>" } else { &g.name };
-                                println!("  '{}' (nostr-id: {})", name, hex::encode(g.nostr_group_id));
+                                let display = if g.name.is_empty() {
+                                    let peer = ctx.get_members_for_group(&g.mls_group_id).ok()
+                                        .and_then(|members| {
+                                            members.into_iter()
+                                                .find(|pk| pk != &ctx.identity.keys.public_key())
+                                                .map(|pk| marmot_agent_core::context::AgentContext::member_npub(&pk))
+                                        });
+                                    match peer {
+                                        Some(p) => format!("<DM with {}>", p),
+                                        None => "<Direct Message>".to_string(),
+                                    }
+                                } else {
+                                    g.name.clone()
+                                };
+                                println!("  '{}' (nostr-id: {})", display, hex::encode(g.nostr_group_id));
                             }
                         }
                     }
