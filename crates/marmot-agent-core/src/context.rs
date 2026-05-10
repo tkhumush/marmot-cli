@@ -110,7 +110,7 @@ impl AgentContext {
                 vec![], // no initial members
                 config,
             )
-            .map_err(|e| crate::Error::Identity(format!("group creation failed: {}", e)))?;
+            .map_err(|e| crate::Error::Group(format!("group creation failed: {}", e)))?;
         Ok(result)
     }
 
@@ -119,7 +119,7 @@ impl AgentContext {
         let groups = self
             .mdk
             .get_groups()
-            .map_err(|e| crate::Error::Identity(format!("storage error: {}", e)))?;
+            .map_err(|e| crate::Error::Group(format!("list groups failed: {}", e)))?;
         Ok(groups)
     }
 
@@ -142,17 +142,20 @@ impl AgentContext {
             .parse_key_package(member_keypackage_event)
             .map_err(|e| crate::Error::Identity(format!("KeyPackage parse failed: {}", e)))?;
 
-        // 3. Add them to the group
+        // 3. Add them to the group.
+        // NOTE: if add_members fails the group created above remains in storage with no
+        // members. MDK does not currently expose a delete_group API, so callers should
+        // treat a create_dm error as potentially leaving a stranded empty group.
         let update_result = self
             .mdk
             .add_members(&mls_group_id, &[member_keypackage_event.clone()])
             .map_err(|e| {
                 if e.to_string().contains("InviteeMissingRequiredProposal") {
-                    crate::Error::Identity(
+                    crate::Error::Group(
                         "Invitee's KeyPackage is missing required MLS proposals".to_string(),
                     )
                 } else {
-                    crate::Error::Identity(format!("add member failed: {}", e))
+                    crate::Error::Group(format!("add member failed: {}", e))
                 }
             })?;
 
@@ -164,10 +167,10 @@ impl AgentContext {
         nostr_group_id_hex: &str,
     ) -> Result<Option<group_types::Group>> {
         let target_bytes = hex::decode(nostr_group_id_hex).map_err(|e| {
-            crate::Error::Identity(format!("invalid nostr group id hex: {}", e))
+            crate::Error::Group(format!("invalid nostr group id hex: {}", e))
         })?;
         if target_bytes.len() != 32 {
-            return Err(crate::Error::Identity(
+            return Err(crate::Error::Group(
                 "nostr group id must be 32 bytes".to_string(),
             ));
         }
@@ -190,7 +193,7 @@ impl AgentContext {
         let event = self
             .mdk
             .create_message(mls_group_id, rumor, None)
-            .map_err(|e| crate::Error::Identity(format!("DM creation failed: {}", e)))?;
+            .map_err(|e| crate::Error::Group(format!("message creation failed: {}", e)))?;
 
         Ok(event)
     }

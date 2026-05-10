@@ -29,6 +29,8 @@ pub enum Error {
     Relay(String),
     #[error("identity error: {0}")]
     Identity(String),
+    #[error("group error: {0}")]
+    Group(String),
     #[error("storage error: {0}")]
     Storage(#[from] Box<dyn std::error::Error + Send + Sync>),
     #[error("io error: {0}")]
