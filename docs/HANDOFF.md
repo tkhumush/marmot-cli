@@ -4,31 +4,29 @@
 
 ## Current State (as of commit `HEAD` on main)
 
+### Phase 4 Complete
+
 ### What Works
 1. **Identity management** — create, list, show, delete, set-default. Persisted to `~/.local/share/marmot-cli/identities/`. Secret keys written atomically at 0o600.
 2. **Encrypted SQLite storage** — `MdkSqliteStorage` with auto-generated AES key at `~/.local/share/marmot-cli/db.key` (also written atomically at 0o600).
 3. **KeyPackage publishing** — `keypackage publish` generates kind 30443 and publishes to 3 default relays.
-4. **Group creation** — `groups create --name <X> --publish` creates MLS group; with `--publish` sends welcome events to relays.
-5. **DM creation** — `dm create --recipient <npub> --publish` fetches recipient KeyPackage from relays, creates 2-member MLS group; with `--publish` sends evolution_commit + welcome events.
-6. **DM sending** — `dm send --group <h-tag-hex> --message <msg> --publish` creates kind 445 encrypted message, resolves `h`-tag to MLS group. With `--publish` sends to relays.
-7. **Groups invite** — `groups invite --group <h-tag> --member <npub> --publish` fetches recipient KeyPackage, calls add_members, optionally publishes commit + welcome.
-8. **Receive** — `receive [--limit N] [--offline]` fetches kind 445/10449/4459 events from all known group h-tags, decrypts + stores them via MDK.
-9. **Message reading** — `groups messages --group <h-tag> [--limit N]` and `dm messages --group <h-tag>` show stored decrypted messages from SQLite.
-10. **Group members** — `groups members --group <h-tag>` lists current MLS group members.
-11. **Daemon (TCP)** — `daemon --listen 127.0.0.1:9222`. JSON-RPC methods: ping (live), identity_npub / list_groups / send_message (stubs).
+4. **KeyPackage show** — `keypackage show` fetches our own KeyPackage from relays and displays event ID + timestamp.
+5. **Group creation** — `groups create --name <X> --publish` creates MLS group; with `--publish` sends welcome events to relays.
+6. **DM creation** — `dm create --recipient <npub> --publish` fetches recipient KeyPackage from relays, creates 2-member MLS group; with `--publish` sends evolution_commit + welcome events.
+7. **DM sending** — `dm send --group <h-tag-hex> --message <msg> --publish` creates kind 445 encrypted message, resolves `h`-tag to MLS group. With `--publish` sends to relays.
+8. **Groups invite** — `groups invite --group <h-tag> --member <npub> --publish` fetches recipient KeyPackage, calls add_members, optionally publishes commit + welcome.
+9. **Receive** — `receive [--limit N] [--offline]` fetches kind 445/10449/4459 events from all known group h-tags AND kind 1059 gift-wrap events (NIP-59 welcome invitations). Decrypts + stores via MDK.
+10. **Message reading** — `groups messages --group <h-tag> [--limit N]` and `dm messages --group <h-tag>` show stored decrypted messages from SQLite.
+11. **Group members** — `groups members --group <h-tag>` lists current MLS group members.
+12. **Groups pending** — `groups pending` lists locally-stored pending welcome invitations (kind 444).
+13. **Groups join** — `groups join [--publish]` accepts all pending welcomes, runs self-update key rotation, optionally publishes the self-update commit events.
+14. **Daemon (TCP)** — `daemon --listen 127.0.0.1:9222`. JSON-RPC methods: ping (live), identity_npub / list_groups / send_message (stubs).
 
 ### Architecture
 - `crates/marmot-agent-core/` — identity, storage, relay, context (MDK wrapper)
 - `crates/marmot-agent-cli/` — `clap` CLI entry point
 - `crates/marmot-agent-rpc/` — JSON-RPC TCP server (currently ping + stubs)
 - `crates/marmot-agent-ffi/` — empty placeholder
-
-### What's Missing / Next Steps
-
-#### Phase 4 — Group Lifecycle (remaining)
-- [ ] **Group join (recipient side)** — `groups join`. Fetch kind 444 welcome events addressed to our pubkey, call `mdk.process_welcome(wrapper_event_id, rumor)` + `mdk.accept_welcome(welcome)`. NIP-59 gift-wrap unwrapping is required. MDK API exists: `get_pending_welcomes()`, `accept_welcome()`, `decline_welcome()`.
-- [ ] **KeyPackage refresh** — `mdk.groups_needing_self_update(threshold_secs)` returns groups needing a key update; `mdk.self_update(group_id)` performs it. Should be run after joining a group and on a schedule.
-- [ ] **`keypackage show`** — display current KeyPackage info (currently a stub).
 
 #### Phase 5 — Tooling + CI
 - [ ] `justfile` with `build`, `test`, `lint`, `fmt`
@@ -57,7 +55,7 @@ crates/
       identity.rs    # Identity struct (nostr::Keys wrapper), atomic secret file write
       storage.rs     # AgentStorage + AgentDirs (XDG), config, db encryption key
       context.rs     # AgentContext (MDK + Identity + Storage) — all group/DM/message ops
-      relay.rs       # publish_event, publish_events, fetch_keypackage, fetch_group_events
+      relay.rs       # publish_event, publish_events, fetch_keypackage, fetch_group_events, fetch_gift_wrap_events
   marmot-agent-cli/
     src/main.rs      # CLI: identity, relay, keypackage, daemon, groups, dm, receive
   marmot-agent-rpc/
@@ -76,6 +74,7 @@ pub async fn publish_event(event: &Event, relays: &[&str]) -> Result<Vec<(String
 pub async fn publish_events(events: &[(&str, &Event)], relays: &[&str]) -> Result<Vec<(&str, Vec<(String, bool)>)>>;
 pub async fn fetch_keypackage(pubkey: PublicKey, relays: &[&str]) -> Result<Option<Event>>;
 pub async fn fetch_group_events(h_tags: &[String], limit: usize, relays: &[&str]) -> Result<Vec<Event>>;
+pub async fn fetch_gift_wrap_events(pubkey: PublicKey, relays: &[&str]) -> Result<Vec<Event>>;
 
 // context.rs
 pub fn create_group(name, relays) -> Result<GroupResult>;
@@ -89,36 +88,13 @@ pub fn get_members_for_group(mls_group_id) -> Result<BTreeSet<PublicKey>>;
 pub fn find_group_by_nostr_id(hex) -> Result<Option<group_types::Group>>;
 pub fn delete_group(mls_group_id) -> Result<()>;
 pub fn list_groups() -> Result<Vec<group_types::Group>>;
+pub fn list_pending_welcomes() -> Result<Vec<welcome_types::Welcome>>;
+pub async fn unwrap_and_process_welcome(gift_wrap: &Event) -> Result<Option<welcome_types::Welcome>>;
+pub fn accept_welcome(welcome: &welcome_types::Welcome) -> Result<()>;
+pub fn groups_needing_self_update(threshold_secs: u64) -> Result<Vec<GroupId>>;
+pub fn self_update_group(mls_group_id: &GroupId) -> Result<UpdateGroupResult>;
 pub fn nostr_group_id_hex(group: &Group) -> String;  // static helper
 pub fn member_npub(pk: &PublicKey) -> String;         // static helper
-```
-
-### MDK APIs ready to use for `groups join`
-
-```rust
-// get pending welcomes (kind 444 events already stored in DB)
-mdk.get_pending_welcomes(pagination: Option<Pagination>) -> Result<Vec<welcome_types::Welcome>>
-
-// process a raw welcome event from relay (stores it as pending)
-mdk.process_welcome(wrapper_event_id: &EventId, rumor: &UnsignedEvent) -> Result<Welcome>
-
-// accept a pending welcome (joins the group, sets state → Active)
-mdk.accept_welcome(welcome: &Welcome) -> Result<()>
-
-// decline a pending welcome
-mdk.decline_welcome(welcome: &Welcome) -> Result<()>
-```
-
-The hard part of `groups join` is fetching kind 444 events from relays. They are NIP-59 gift wraps (kind 1059) addressed to the recipient's pubkey, containing a sealed rumor of kind 444. The `nostr` crate has NIP-59 unwrapping support (`nostr::nip59`). The rumor inside must be passed to `mdk.process_welcome()` as `UnsignedEvent`.
-
-### MDK APIs ready for `self_update` / KeyPackage refresh
-
-```rust
-// check which groups need a self-update commit
-mdk.groups_needing_self_update(threshold_secs: u64) -> Result<Vec<GroupId>>
-
-// perform a self-update for a group
-mdk.self_update(group_id: &GroupId) -> Result<UpdateGroupResult>
 ```
 
 ### Default Relays
@@ -144,21 +120,27 @@ $e keypackage publish
 $e dm create --recipient npub1vl73xzhpyucxjt5dvam2zyfsllffc4kzwdn9rppym3ck5twpedlsamyt49 --publish
 $e dm send --group <GROUP_HEX> --message "hello" --publish
 
-# Fetch incoming messages and read them
+# Fetch incoming messages + group invitations, then read
 $e receive --limit 100
 $e dm messages --group <GROUP_HEX>
+$e groups messages --group <GROUP_HEX>
 
 # Invite a member to a group
 $e groups invite --group <GROUP_HEX> --member <NPUB> --publish
 
 # See who's in a group
 $e groups members --group <GROUP_HEX>
+
+# Check + accept group invitations (recipient side)
+$e groups pending
+$e groups join --publish
+
+# Show our published KeyPackage
+$e keypackage show
 ```
 
 ### Known Issues
 - Dead code warning: `Request.jsonrpc` field in `marmot-agent-rpc/src/server.rs` (harmless)
 - Daemon JSON-RPC methods are stubs (`identity_npub`, `list_groups`, `send_message`)
-- `groups join` not implemented (see MDK API notes above)
-- `keypackage show` is a stub
 - `marmot-agent-ffi` crate is empty
 - Relay publish results are per-broadcast, not per-relay (pool sends to all at once; per-relay status is inferred)
