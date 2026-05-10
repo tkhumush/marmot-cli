@@ -413,7 +413,7 @@ async fn main() {
                             println!("Groups:");
                             for g in groups {
                                 let name = if g.name.is_empty() { "unnamed" } else { &g.name };
-                                println!("  Group '{}' (id: {})", name, hex::encode(g.mls_group_id.as_slice()));
+                                println!("  Group '{}' (nostr-id: {})", name, hex::encode(g.nostr_group_id));
                             }
                         }
                     }
@@ -431,7 +431,7 @@ async fn main() {
                 match ctx.create_group(&name, relays) {
                     Ok(result) => {
                         println!("Group '{}' created!", name);
-                        println!("  MLS group ID: {}", hex::encode(result.group.mls_group_id.as_slice()));
+                        println!("  Nostr group ID: {}", hex::encode(result.group.nostr_group_id));
 
                         if publish {
                             let mut events_to_publish: Vec<(&str, Event)> = Vec::new();
@@ -795,7 +795,7 @@ async fn main() {
                             println!("Conversations:");
                             for g in groups {
                                 let name = if g.name.is_empty() { "unnamed" } else { &g.name };
-                                println!("  '{}' (id: {})", name, hex::encode(g.mls_group_id.as_slice()));
+                                println!("  '{}' (nostr-id: {})", name, hex::encode(g.nostr_group_id));
                             }
                         }
                     }
@@ -807,8 +807,6 @@ async fn main() {
 
                 match ctx.find_group_by_nostr_id(&group) {
                     Ok(Some(g)) => {
-                        let group_id_hex = hex::encode(&g.mls_group_id.as_slice());
-                        println!("  Resolved to MLS group: {}", group_id_hex);
                         match ctx.create_dm_message(&g.mls_group_id, &message) {
                             Ok(event) => {
                                 println!("Encrypted message created!");
