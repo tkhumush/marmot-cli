@@ -35,7 +35,7 @@ enum Commands {
     },
     /// Start the background daemon.
     Daemon {
-        #[arg(short, long, default_value = "/tmp/marmot-agent.sock")]
+        #[arg(short, long, default_value = "127.0.0.1:9222")]
         listen: String,
     },
     /// Group management.
@@ -350,7 +350,7 @@ async fn main() {
             println!("JSON-RPC methods available: ping, identity_npub, list_groups, send_message");
             println!("Press Ctrl+C to stop.");
 
-            if let Err(e) = marmot_agent_rpc::server::serve_unix_socket_blocking(&listen,
+            if let Err(e) = marmot_agent_rpc::server::serve_tcp_blocking(&listen,
                 handler,
             ) {
                 eprintln!("Daemon error: {}", e);

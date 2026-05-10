@@ -62,11 +62,6 @@ impl AgentDirs {
     pub fn db_key_path(&self) -> PathBuf {
         self.data_dir.join("db.key")
     }
-
-    /// Path to the daemon socket.
-    pub fn socket_path(&self) -> PathBuf {
-        self.state_dir.join("marmot-agent.sock")
-    }
 }
 
 /// Global agent configuration.
@@ -92,7 +87,7 @@ impl AgentConfig {
         }
         Self {
             default_relays: crate::Config::default_relays(),
-            daemon_listen: dirs.socket_path().to_string_lossy().to_string(),
+            daemon_listen: "127.0.0.1:9222".to_string(),
             ..Default::default()
         }
     }

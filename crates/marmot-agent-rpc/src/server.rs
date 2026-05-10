@@ -1,13 +1,16 @@
-//! Synchronous JSON-RPC server over Unix socket for marmot-agent daemon.
+//! Synchronous JSON-RPC server over TCP for marmot-agent daemon.
 //!
-//! Uses std::os::unix::net::UnixListener with one thread per client.
+//! Uses std::net::TcpListener with one thread per client.
 //! This is a dev/testing server — simple, no async, no tokio.
+//!
+//! On startup it binds to the configured address (e.g. 127.0.0.1:9222).
+//! If the address is "127.0.0.1:0" or similar, the OS assigns a free port;
+//! the assigned port is printed so clients know where to connect.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
 use tracing::{info, warn};
@@ -68,24 +71,27 @@ pub type HandlerFn = Arc<
     dyn Fn(String, Value) -> Result<Value, String> + Send + Sync,
 >;
 
-/// Start a blocking JSON-RPC server on a Unix socket.
+/// Start a blocking JSON-RPC server on a TCP socket.
 ///
 /// This runs in the current thread and blocks until an accept error occurs.
 /// Run it in a dedicated thread from your daemon entry point.
-pub fn serve_unix_socket_blocking(
-    socket_path: &str,
+///
+/// If bind_address is "127.0.0.1:0", the OS picks a free port and the actual
+/// listening address is printed.
+pub fn serve_tcp_blocking(
+    bind_address: &str,
     handler: HandlerFn,
 ) -> Result<(), std::io::Error> {
-    let path = Path::new(socket_path);
-    if path.exists() {
-        std::fs::remove_file(path)?;
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let listener = UnixListener::bind(socket_path)?;
-    info!("JSON-RPC server listening on {}", socket_path);
+    let listener = TcpListener::bind(bind_address)?;
+    let actual_addr = listener.local_addr()?;
+    info!(
+        "JSON-RPC server listening on {} (requested: {})",
+        actual_addr, bind_address
+    );
+    println!(
+        "Daemon listening on {} (requested: {})",
+        actual_addr, bind_address
+    );
 
     for stream in listener.incoming() {
         match stream {
@@ -103,7 +109,7 @@ pub fn serve_unix_socket_blocking(
     Ok(())
 }
 
-fn handle_client(stream: UnixStream, handler: HandlerFn) {
+fn handle_client(stream: TcpStream, handler: HandlerFn) {
     let mut reader = BufReader::new(&stream);
     let mut writer = &stream;
     let mut line = String::new();
