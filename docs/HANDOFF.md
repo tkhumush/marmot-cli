@@ -13,13 +13,13 @@
 4. **KeyPackage show** — `keypackage show` fetches our own KeyPackage from relays and displays event ID + timestamp.
 5. **Group creation** — `groups create --name <X> --publish` creates MLS group; with `--publish` sends welcome events to relays.
 6. **DM creation** — `dm create --recipient <npub> --publish` fetches recipient KeyPackage from relays, creates 2-member MLS group; with `--publish` sends evolution_commit + welcome events.
-7. **DM sending** — `dm send --group <h-tag-hex> --message <msg> --publish` creates kind 445 encrypted message, resolves `h`-tag to MLS group. With `--publish` sends to relays.
+7. **DM sending** — `dm send --group <h-tag-hex> --message <msg> --publish` creates kind 445 encrypted message (inner rumor is kind 9 per MIP-03), resolves `h`-tag to MLS group. With `--publish` sends to relays.
 8. **Groups invite** — `groups invite --group <h-tag> --member <npub> --publish` fetches recipient KeyPackage, calls add_members, optionally publishes commit + welcome.
 9. **Receive** — `receive [--limit N] [--offline]` fetches kind 445/10449/4459 events from all known group h-tags AND kind 1059 gift-wrap events (NIP-59 welcome invitations). Decrypts + stores via MDK.
 10. **Message reading** — `groups messages --group <h-tag> [--limit N]` and `dm messages --group <h-tag>` show stored decrypted messages from SQLite.
 11. **Group members** — `groups members --group <h-tag>` lists current MLS group members.
 12. **Groups pending** — `groups pending` lists locally-stored pending welcome invitations (kind 444).
-13. **Groups join** — `groups join [--publish]` accepts all pending welcomes, runs self-update key rotation, optionally publishes the self-update commit events.
+13. **Groups join** — `groups join` accepts all pending welcomes. Self-update is intentionally NOT run automatically (White Noise also disables post-welcome self-update — running it immediately causes epoch ordering issues where replies fail to decrypt at the other side).
 14. **Daemon (TCP)** — `daemon --listen 127.0.0.1:9222`. JSON-RPC methods: ping (live), identity_npub / list_groups / send_message (stubs).
 
 ### Architecture

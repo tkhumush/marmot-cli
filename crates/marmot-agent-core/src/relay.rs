@@ -2,6 +2,36 @@ use nostr::{Alphabet, Event, Filter, Kind, PublicKey, RelayUrl, SingleLetterTag}
 use nostr_relay_pool::{relay::ReqExitPolicy, RelayPool, RelayOptions};
 use tracing::{info, warn};
 
+/// Fetch raw events matching an arbitrary filter. For diagnostics only.
+pub async fn fetch_raw(filter: Filter, relays: &[&str]) -> crate::Result<Vec<Event>> {
+    let pool = RelayPool::default();
+    for url in relays {
+        match RelayUrl::parse(url) {
+            Ok(relay_url) => {
+                if let Err(e) = pool.add_relay(relay_url, RelayOptions::default()).await {
+                    warn!("failed to add relay {}: {}", url, e);
+                }
+            }
+            Err(e) => warn!("invalid relay URL {}: {}", url, e),
+        }
+    }
+    pool.connect().await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    let events = match pool.fetch_events(
+        vec![filter],
+        std::time::Duration::from_secs(8),
+        ReqExitPolicy::ExitOnEOSE,
+    ).await {
+        Ok(evs) => evs.to_vec(),
+        Err(e) => {
+            warn!("fetch_raw failed: {}", e);
+            vec![]
+        }
+    };
+    pool.disconnect().await;
+    Ok(events)
+}
+
 use crate::Result;
 
 /// Default relay list inherited from the White Noise messenger.

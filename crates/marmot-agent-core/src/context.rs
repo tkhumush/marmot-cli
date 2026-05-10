@@ -188,7 +188,7 @@ impl AgentContext {
         mls_group_id: &GroupId,
         content: &str,
     ) -> Result<Event> {
-        let rumor: UnsignedEvent = EventBuilder::new(Kind::TextNote, content)
+        let rumor: UnsignedEvent = EventBuilder::new(Kind::ChatMessage, content)
             .build(self.identity.keys.public_key());
 
         let event = self
@@ -275,6 +275,15 @@ impl AgentContext {
         self.mdk
             .delete_group(mls_group_id)
             .map_err(|e| crate::Error::Group(format!("failed to delete group: {}", e)))
+    }
+
+    /// Return the relay URLs configured for a group (stored in MLS group state).
+    /// Use these when publishing events for the group so the recipient's subscription receives them.
+    pub fn get_group_relays(&self, mls_group_id: &GroupId) -> Result<Vec<String>> {
+        self.mdk
+            .get_relays(mls_group_id)
+            .map(|set| set.into_iter().map(|url| url.to_string()).collect())
+            .map_err(|e| crate::Error::Group(format!("failed to get group relays: {}", e)))
     }
 
     /// Return the nostr_group_id (h-tag hex) for display.

@@ -55,6 +55,11 @@ enum Commands {
         #[arg(long, help = "Do not connect to relays; only show already-stored messages")]
         offline: bool,
     },
+    /// Diagnose relay events for a given pubkey (interop debugging).
+    Debug {
+        #[arg(help = "Pubkey (hex or npub) to inspect events for")]
+        pubkey: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -624,49 +629,32 @@ async fn main() {
                     return;
                 }
 
-                // Run self-update on all groups that need a key rotation after joining.
-                let needing_update = match ctx.groups_needing_self_update(0) {
-                    Ok(ids) => ids,
-                    Err(e) => {
-                        eprintln!("Failed to check groups needing self-update: {e}");
-                        return;
-                    }
-                };
+                println!("\nAccepted {} invitation(s).", accepted);
 
-                if needing_update.is_empty() {
-                    println!("\nNo self-update needed.");
-                    return;
-                }
-
-                println!("\nRunning self-update for {} group(s)...", needing_update.len());
-                for group_id in &needing_update {
-                    match ctx.self_update_group(group_id) {
-                        Ok(result) => {
-                            println!("  Self-update commit: {}", result.evolution_event.id);
-
-                            if publish {
-                                let ev = marmot_agent_core::context::AgentContext::evolution_event(&result);
-                                match marmot_agent_core::relay::publish_events(
-                                    &[("evolution_commit", ev)],
-                                    &marmot_agent_core::relay::DEFAULT_RELAYS,
-                                ).await {
-                                    Ok(results) => {
-                                        for (label, relay_results) in results {
-                                            let ok = relay_results.iter().filter(|(_, ok)| *ok).count();
-                                            println!("    {}: {}/{} relays OK", label, ok, relay_results.len());
-                                        }
-                                    }
-                                    Err(e) => eprintln!("  Publish failed: {e}"),
-                                }
+                // Rotate KeyPackage so the consumed one is replaced on relays.
+                // MLS KeyPackages are single-use; without rotation, the next DM invite will fail.
+                let relays: Vec<nostr::RelayUrl> = marmot_agent_core::relay::DEFAULT_RELAYS
+                    .iter()
+                    .filter_map(|url| nostr::RelayUrl::parse(url).ok())
+                    .collect();
+                match ctx.create_keypackage(relays) {
+                    Ok(kp_data) => match ctx.sign_keypackage_event(&kp_data) {
+                        Ok(event) => {
+                            match marmot_agent_core::relay::publish_event(
+                                &event,
+                                &marmot_agent_core::relay::DEFAULT_RELAYS,
+                            ).await {
+                                Ok(_) => println!("  KeyPackage rotated on relays."),
+                                Err(e) => eprintln!("  KeyPackage publish failed: {e}"),
                             }
                         }
-                        Err(e) => eprintln!("  Self-update failed: {e}"),
-                    }
+                        Err(e) => eprintln!("  KeyPackage signing failed: {e}"),
+                    },
+                    Err(e) => eprintln!("  KeyPackage creation failed: {e}"),
                 }
 
-                if !publish {
-                    println!("  NOTE: Use --publish to send self-update commits to relays.");
-                }
+                println!("\nRun 'receive' to fetch new messages.");
+                let _ = publish; // --publish flag reserved for future use
             }
         },
         Commands::Dm { action } => match action {
@@ -788,10 +776,22 @@ async fn main() {
                                 println!("  Kind: {}", event.kind);
 
                                 if publish {
+                                    // Publish to group-configured relays + DEFAULT_RELAYS
+                                    let mut relay_urls: Vec<String> = marmot_agent_core::relay::DEFAULT_RELAYS
+                                        .iter().map(|s| s.to_string()).collect();
+                                    if let Ok(group_relays) = ctx.get_group_relays(&g.mls_group_id) {
+                                        for r in group_relays {
+                                            if !relay_urls.contains(&r) {
+                                                relay_urls.push(r);
+                                            }
+                                        }
+                                    }
+                                    let relay_refs: Vec<&str> = relay_urls.iter().map(|s| s.as_str()).collect();
+
                                     println!("  Publishing to relays...");
                                     let results = match marmot_agent_core::relay::publish_event(
                                         &event,
-                                        &marmot_agent_core::relay::DEFAULT_RELAYS,
+                                        &relay_refs,
                                     ).await {
                                         Ok(r) => r,
                                         Err(e) => {
@@ -950,6 +950,142 @@ async fn main() {
             }
             if new_messages > 0 {
                 println!("\nRun 'groups messages --group <id>' or 'dm messages --group <id>' to read.");
+            }
+        }
+        Commands::Debug { pubkey } => {
+            let Some(ctx) = load_default_context().await else { return; };
+
+            let target_pk = match PublicKey::parse(&pubkey) {
+                Ok(pk) => pk,
+                Err(e) => { eprintln!("Invalid pubkey '{}': {e}", pubkey); return; }
+            };
+            let target_hex = target_pk.to_hex();
+            let our_pk = ctx.identity.keys.public_key();
+
+            println!("=== Diagnosing relay events ===");
+            println!("  Target pubkey : {}", target_hex);
+            println!("  Our pubkey    : {}", our_pk.to_hex());
+            println!();
+
+            // 1. Kind 445/10449/4459 events published BY the target pubkey
+            println!("--- Events authored by target (kinds 445/10449/4459) ---");
+            let filter = nostr::Filter::new()
+                .author(target_pk)
+                .kinds(vec![nostr::Kind::Custom(445), nostr::Kind::Custom(10449), nostr::Kind::Custom(4459)])
+                .limit(50);
+            match marmot_agent_core::relay::fetch_raw(filter, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
+                Ok(events) => {
+                    if events.is_empty() {
+                        println!("  (none found)");
+                    }
+                    for ev in &events {
+                        let h_tags: Vec<String> = ev.tags.iter()
+                            .filter(|t| t.kind() == nostr::TagKind::SingleLetter(nostr::SingleLetterTag::lowercase(nostr::Alphabet::H)))
+                            .filter_map(|t| t.content().map(|s| s.to_string()))
+                            .collect();
+                        println!("  kind={} id={} created={} h-tags={:?}",
+                            ev.kind, &ev.id.to_hex()[..12], ev.created_at, h_tags);
+                    }
+                }
+                Err(e) => eprintln!("  fetch failed: {e}"),
+            }
+            println!();
+
+            // 2. Gift wraps (kind 1059) addressed to OUR pubkey
+            println!("--- Gift wraps addressed to us (kind 1059) ---");
+            let filter = nostr::Filter::new()
+                .kind(nostr::Kind::GiftWrap)
+                .pubkey(our_pk)
+                .limit(50);
+            match marmot_agent_core::relay::fetch_raw(filter, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
+                Ok(events) => {
+                    if events.is_empty() {
+                        println!("  (none found)");
+                    }
+                    for ev in &events {
+                        print!("  id={} created={} outer_pubkey={} → ",
+                            &ev.id.to_hex()[..12], ev.created_at, &ev.pubkey.to_hex()[..12]);
+                        match ctx.unwrap_and_process_welcome(&ev).await {
+                            Ok(Some(w)) => println!("kind=444 welcome, nostr_group={}", hex::encode(w.nostr_group_id)),
+                            Ok(None) => {
+                                // Not a welcome — try unwrapping manually to see the inner kind
+                                match nostr::nips::nip59::extract_rumor(&ctx.identity.keys, ev).await {
+                                    Ok(unwrapped) => println!("kind={} (not a welcome)", unwrapped.rumor.kind),
+                                    Err(e) => println!("unwrap failed: {e}"),
+                                }
+                            }
+                            Err(e) => println!("process_welcome error: {e}"),
+                        }
+                    }
+                }
+                Err(e) => eprintln!("  fetch failed: {e}"),
+            }
+            println!();
+
+            // 3. Gift wraps published BY the target (to find what they sent us)
+            println!("--- Gift wraps authored by target (kind 1059) ---");
+            let filter = nostr::Filter::new()
+                .kind(nostr::Kind::GiftWrap)
+                .author(target_pk)
+                .limit(50);
+            match marmot_agent_core::relay::fetch_raw(filter, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
+                Ok(events) => {
+                    if events.is_empty() {
+                        println!("  (none — gift wraps use random outer keys, so author filter won't work)");
+                    } else {
+                        for ev in &events {
+                            println!("  id={} created={}", &ev.id.to_hex()[..12], ev.created_at);
+                        }
+                    }
+                }
+                Err(e) => eprintln!("  fetch failed: {e}"),
+            }
+            println!();
+
+            // 4. All events on relay for shared groups (by h-tag)
+            println!("--- Events on relay for shared groups ---");
+            match ctx.list_groups() {
+                Ok(groups) => {
+                    // Only check groups that involve the target pubkey (name contains their hex)
+                    let target_short = &target_hex[..16];
+                    let relevant: Vec<_> = groups.iter()
+                        .filter(|g| g.name.contains(target_short) || g.name.contains(&target_hex))
+                        .collect();
+                    if relevant.is_empty() {
+                        // Fall back: show all groups
+                        for g in &groups {
+                            println!("  {} ({})", hex::encode(g.nostr_group_id), g.name);
+                        }
+                    } else {
+                        for g in &relevant {
+                            let h = hex::encode(g.nostr_group_id);
+                            println!("  Group '{}' h={}", g.name, h);
+                            let filter = nostr::Filter::new()
+                                .kinds(vec![
+                                    nostr::Kind::Custom(445),
+                                    nostr::Kind::Custom(10449),
+                                    nostr::Kind::Custom(4459),
+                                ])
+                                .custom_tags(
+                                    nostr::SingleLetterTag::lowercase(nostr::Alphabet::H),
+                                    [h.clone()],
+                                )
+                                .limit(20);
+                            match marmot_agent_core::relay::fetch_raw(filter, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
+                                Ok(evs) => {
+                                    for ev in &evs {
+                                        println!("    kind={} id={} author={} created={}",
+                                            ev.kind, &ev.id.to_hex()[..16],
+                                            &ev.pubkey.to_hex()[..12], ev.created_at);
+                                    }
+                                    if evs.is_empty() { println!("    (no events found)"); }
+                                }
+                                Err(e) => eprintln!("    fetch failed: {e}"),
+                            }
+                        }
+                    }
+                }
+                Err(e) => eprintln!("  {e}"),
             }
         }
     }

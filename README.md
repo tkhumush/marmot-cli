@@ -8,7 +8,7 @@ Uses [MLS (RFC 9420)](https://www.rfc-editor.org/rfc/rfc9420.html) for encryptio
 
 ## Status
 
-**CLI-complete.** All core messaging flows are implemented and work via subprocess, the same pattern signal-cli uses. A JSON-RPC daemon mode exists but its methods are stubs — that is the next development phase.
+**CLI-complete.** All core messaging flows are implemented and interoperability with [White Noise](https://github.com/marmot-protocol/whitenoise) is confirmed — two-way MLS-encrypted messaging works end-to-end. Invoke via subprocess (signal-cli style) or use the JSON-RPC daemon (ping live; other methods are stubs and the next development phase).
 
 ## Install
 
@@ -109,8 +109,8 @@ marmot-cli groups messages --group <hex> [--limit 20]
 # List pending group invitations (received but not yet accepted)
 marmot-cli groups pending
 
-# Accept all pending invitations + run self-update key rotation
-marmot-cli groups join [--publish]
+# Accept all pending invitations
+marmot-cli groups join
 ```
 
 ### Receive
