@@ -1,0 +1,32 @@
+[package]
+name = "marmot-agent-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "Headless CLI for Marmot Protocol — daemon, JSON-RPC, and chat commands"
+
+[[bin]]
+name = "marmot-cli"
+path = "src/main.rs"
+
+[dependencies]
+marmot-agent-core = { workspace = true, path = "../marmot-agent-core" }
+marmot-agent-rpc = { workspace = true, path = "../marmot-agent-rpc" }
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+hex.workspace = true
+chrono.workspace = true
+
+[features]
+default = []
+ffi = ["marmot-agent-core/ffi"]

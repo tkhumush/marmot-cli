@@ -1,0 +1,33 @@
+[package]
+name = "marmot-agent-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "Core messaging engine for marmot-cli: identity, groups, and relay management built on Marmot Protocol"
+
+[dependencies]
+mdk-core.workspace = true
+mdk-storage-traits.workspace = true
+nostr.workspace = true
+nostr-relay-pool.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+hex.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+mdk-memory-storage.workspace = true
+
+[features]
+default = []
+ffi = []

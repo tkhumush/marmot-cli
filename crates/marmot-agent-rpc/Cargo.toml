@@ -1,0 +1,24 @@
+[package]
+name = "marmot-agent-rpc"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "JSON-RPC and gRPC server interfaces for marmot-agent"
+
+[dependencies]
+marmot-agent-core = { workspace = true, path = "../marmot-agent-core" }
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+
+[features]
+default = []
+ggrpc = []

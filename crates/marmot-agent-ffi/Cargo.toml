@@ -1,0 +1,22 @@
+[package]
+name = "marmot-agent-ffi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "Python FFI bindings for marmot-agent"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+marmot-agent-core = { workspace = true, path = "../marmot-agent-core" }
+# pyo3 = { version = "0.23", features = ["extension-module"] }  # Uncomment when needed
+tokio.workspace = true
+
+[features]
+default = []
