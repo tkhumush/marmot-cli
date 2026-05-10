@@ -1,4 +1,4 @@
-use nostr::{Event, Filter, Kind, PublicKey, RelayUrl};
+use nostr::{Alphabet, Event, Filter, Kind, PublicKey, RelayUrl, SingleLetterTag};
 use nostr_relay_pool::{relay::ReqExitPolicy, RelayPool, RelayOptions};
 use tracing::{info, warn};
 
@@ -151,4 +151,54 @@ pub async fn fetch_keypackage(
 
     pool.disconnect().await;
     Ok(events.into_iter().next())
+}
+
+/// Fetch group-related events (kind 445 / 10449 / 4459) from relays matching given h-tags.
+/// Returns events newest first, limited by `limit`.
+pub async fn fetch_group_events(
+    h_tags: &[String],
+    limit: usize,
+    relays: &[&str],
+) -> Result<Vec<Event>> {
+    let pool = RelayPool::default();
+    for url in relays {
+        match RelayUrl::parse(url) {
+            Ok(relay_url) => {
+                if let Err(e) = pool.add_relay(relay_url, RelayOptions::default()).await {
+                    warn!("failed to add relay {}: {}", url, e);
+                }
+            }
+            Err(e) => warn!("invalid relay URL {}: {}", url, e),
+        }
+    }
+    pool.connect().await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let filter = Filter::new()
+        .kinds(vec![Kind::Custom(445), Kind::Custom(10449), Kind::Custom(4459)])
+        .limit(limit);
+    let filter = if !h_tags.is_empty() {
+        filter.custom_tags(SingleLetterTag::lowercase(Alphabet::H), h_tags.iter().cloned())
+    } else {
+        filter
+    };
+
+    let mut all_events = Vec::new();
+    match pool.fetch_events(
+        vec![filter],
+        std::time::Duration::from_secs(8),
+        ReqExitPolicy::ExitOnEOSE,
+    ).await {
+        Ok(events) => all_events.extend(events.into_iter()),
+        Err(e) => warn!("Failed to fetch group events: {}", e),
+    }
+    pool.disconnect().await;
+
+    // Deduplicate by event id
+    let mut seen = std::collections::HashSet::new();
+    all_events.retain(|ev| seen.insert(ev.id));
+    // Sort newest first
+    all_events.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    Ok(all_events)
 }
