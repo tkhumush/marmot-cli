@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::sync::Arc;
 use tracing::Level;
-use nostr::PublicKey;
+use nostr::{Event, PublicKey};
 use mdk_core::GroupId;
 
 #[derive(Parser)]
@@ -94,6 +94,8 @@ enum GroupAction {
     Create {
         #[arg(short, long, help = "Group name")]
         name: String,
+        #[arg(long, help = "Also publish the group creation events to relays")]
+        publish: bool,
     },
     Invite {
         #[arg(short, long, help = "Group ID")]
@@ -109,6 +111,8 @@ enum DmAction {
     Create {
         #[arg(short, long, help = "Recipient npub")]
         recipient: String,
+        #[arg(long, help = "Also publish the DM group creation events to relays")]
+        publish: bool,
     },
     /// List all conversation groups.
     List,
@@ -118,6 +122,8 @@ enum DmAction {
         group: String,
         #[arg(short, long, help = "Message content")]
         message: String,
+        #[arg(long, help = "Also publish the message to group relays")]
+        publish: bool,
     },
 }
 
@@ -393,7 +399,7 @@ async fn main() {
                     Err(e) => eprintln!("Failed to list groups: {}", e),
                 }
             }
-            GroupAction::Create { name } => {
+            GroupAction::Create { name, publish } => {
                 let storage = match marmot_agent_core::storage::AgentStorage::init().await {
                     Ok(s) => s,
                     Err(e) => {
@@ -423,6 +429,58 @@ async fn main() {
                     Ok(result) => {
                         println!("Group '{}' created!", name);
                         println!("  MLS group ID: {:?}", result.group.mls_group_id);
+
+                        if publish {
+                            let mut events_to_publish: Vec<(&str, Event)> = Vec::new();
+
+                            // Sign any welcome rumors
+                            for (i, rumor) in result.welcome_rumors.iter().enumerate() {
+                                let event = match rumor
+                                    .clone()
+                                    .sign_with_keys(&ctx.identity.keys)
+                                {
+                                    Ok(e) => e,
+                                    Err(e) => {
+                                        eprintln!("Failed to sign welcome rumor {}: {}", i, e);
+                                        continue;
+                                    }
+                                };
+                                events_to_publish.push(("welcome", event));
+                            }
+
+                            if !events_to_publish.is_empty() {
+                                println!("  Publishing welcome events to relays...");
+                                let refs: Vec<(&str, &Event)> = events_to_publish
+                                    .iter()
+                                    .map(|(label, ev)| (*label, ev))
+                                    .collect();
+
+                                let results = match marmot_agent_core::relay::publish_events(
+                                    &refs,
+                                    &marmot_agent_core::relay::DEFAULT_RELAYS,
+                                ).await {
+                                    Ok(r) => r,
+                                    Err(e) => {
+                                        eprintln!("Publish failed: {}", e);
+                                        return;
+                                    }
+                                };
+
+                                println!("  Publish results:");
+                                for (label, relay_results) in results {
+                                    let ok_count = relay_results.iter().filter(|(_, ok)| *ok).count();
+                                    println!("    {}: {}/{} relays OK", label, ok_count, relay_results.len());
+                                    for (url, ok) in relay_results {
+                                        let status = if ok { "OK" } else { "FAIL" };
+                                        println!("      {} {}", status, url);
+                                    }
+                                }
+                            } else {
+                                println!("  No welcome events to publish (group has no initial members).");
+                            }
+                        } else {
+                            println!("  NOTE: Use --publish to send welcome events to relays.");
+                        }
                     }
                     Err(e) => eprintln!("Group creation failed: {}", e),
                 }
@@ -432,7 +490,7 @@ async fn main() {
             }
         },
         Commands::Dm { action } => match action {
-            DmAction::Create { recipient } => {
+            DmAction::Create { recipient, publish } => {
                 let storage = match marmot_agent_core::storage::AgentStorage::init().await {
                     Ok(s) => s,
                     Err(e) => {
@@ -495,7 +553,44 @@ async fn main() {
                 println!("DM group created!");
                 println!("  Commit event ID: {}", result.evolution_event.id);
                 println!("  Welcome rumors: {}", result.welcome_rumors.as_ref().map(|w| w.len()).unwrap_or(0));
-                println!("\n  NOTE: Events not published. Use relay publish commands to send them.");
+
+                if publish {
+                    println!("\n  Publishing events to relays...");
+                    let to_publish = match ctx.prepare_group_update_events(&result) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            eprintln!("Failed to prepare events for publishing: {}", e);
+                            return;
+                        }
+                    };
+
+                    let refs: Vec<(&str, &Event)> = to_publish.iter()
+                        .map(|(label, ev)| (*label, ev))
+                        .collect();
+
+                    let results = match marmot_agent_core::relay::publish_events(
+                        &refs,
+                        &marmot_agent_core::relay::DEFAULT_RELAYS,
+                    ).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("Publish failed: {}", e);
+                            return;
+                        }
+                    };
+
+                    println!("  Publish results:");
+                    for (label, relay_results) in results {
+                        let ok_count = relay_results.iter().filter(|(_, ok)| *ok).count();
+                        println!("    {}: {}/{} relays OK", label, ok_count, relay_results.len());
+                        for (url, ok) in relay_results {
+                            let status = if ok { "OK" } else { "FAIL" };
+                            println!("      {} {}", status, url);
+                        }
+                    }
+                } else {
+                    println!("\n  NOTE: Events not published. Use --publish to send them.");
+                }
             }
             DmAction::List => {
                 let storage = match marmot_agent_core::storage::AgentStorage::init().await {
@@ -533,7 +628,7 @@ async fn main() {
                     Err(e) => eprintln!("Failed to list conversations: {}", e),
                 }
             }
-            DmAction::Send { group, message } => {
+            DmAction::Send { group, message, publish } => {
                 let storage = match marmot_agent_core::storage::AgentStorage::init().await {
                     Ok(s) => s,
                     Err(e) => {
@@ -569,7 +664,29 @@ async fn main() {
                         println!("Encrypted message created!");
                         println!("  Event ID: {}", event.id);
                         println!("  Kind: {}", event.kind);
-                        println!("\n  NOTE: Not published. Use relay publish to send.");
+
+                        if publish {
+                            println!("  Publishing to relays...");
+                            let results = match marmot_agent_core::relay::publish_event(
+                                &event,
+                                &marmot_agent_core::relay::DEFAULT_RELAYS,
+                            ).await {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    eprintln!("Publish failed: {}", e);
+                                    return;
+                                }
+                            };
+
+                            let ok_count = results.iter().filter(|(_, ok)| *ok).count();
+                            println!("  Published: {}/{} relays OK", ok_count, results.len());
+                            for (url, ok) in results {
+                                let status = if ok { "OK" } else { "FAIL" };
+                                println!("    {} {}", status, url);
+                            }
+                        } else {
+                            println!("\n  NOTE: Not published. Use --publish to send.");
+                        }
                     }
                     Err(e) => eprintln!("Message creation failed: {}", e),
                 }

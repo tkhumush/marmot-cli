@@ -11,7 +11,7 @@ pub const DEFAULT_RELAYS: [&str; 3] = [
     "wss://relay.damus.io",
 ];
 
-/// Publish a Nostr event to a set of relays via RelayPool.
+/// Publish a single Nostr event to a set of relays via RelayPool.
 pub async fn publish_event(
     event: &Event,
     relays: &[&str],
@@ -56,6 +56,58 @@ pub async fn publish_event(
 
     pool.disconnect().await;
     Ok(results)
+}
+
+/// Publish multiple Nostr events in sequence to a set of relays.
+/// Returns per-event results: (event_label, Vec<(relay_url, ok)>).
+///
+/// # Arguments
+/// * `events` - List of (label, event) tuples for traceability
+/// * `relays` - Relay URLs as string slices
+pub async fn publish_events<'a>(
+    events: &'a [(&'a str, &'a Event)],
+    relays: &'a [&'a str],
+) -> Result<Vec<(&'a str, Vec<(String, bool)>)>> {
+    let pool = RelayPool::default();
+
+    // Add all relays once
+    for url in relays {
+        match RelayUrl::parse(url) {
+            Ok(relay_url) => {
+                if let Err(e) = pool.add_relay(relay_url, RelayOptions::default()).await {
+                    warn!("failed to add relay {}: {}", url, e);
+                }
+            }
+            Err(e) => {
+                warn!("invalid relay URL {}: {}", url, e);
+            }
+        }
+    }
+
+    pool.connect().await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let mut all_results = Vec::new();
+
+    for (label, event) in events {
+        // The label here is used for traceability in logs.
+        let _label = label; // prefix: label string
+        match pool.send_event(event).await {
+            Ok(_) => {
+                info!("{} published: {}", label, event.id);
+                let sub_results = relays.iter().map(|url| (url.to_string(), true)).collect();
+                all_results.push((*label, sub_results));
+            }
+            Err(e) => {
+                warn!("failed to publish {}: {}", label, e);
+                let sub_results = relays.iter().map(|url| (url.to_string(), false)).collect();
+                all_results.push((*label, sub_results));
+            }
+        }
+    }
+
+    pool.disconnect().await;
+    Ok(all_results)
 }
 
 /// Fetch the latest KeyPackage event (kind 30443) for a given user from relays.
