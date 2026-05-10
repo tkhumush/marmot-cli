@@ -2,7 +2,6 @@ use clap::{Parser, Subcommand};
 use std::sync::Arc;
 use tracing::Level;
 use nostr::{Event, PublicKey};
-use mdk_core::GroupId;
 
 #[derive(Parser)]
 #[command(name = "marmot-cli")]
