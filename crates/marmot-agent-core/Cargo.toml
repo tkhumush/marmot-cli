@@ -13,8 +13,12 @@ description = "Core messaging engine for marmot-cli: identity, groups, and relay
 [dependencies]
 mdk-core.workspace = true
 mdk-storage-traits.workspace = true
+mdk-memory-storage.workspace = true
+mdk-sqlite-storage.workspace = true
 nostr.workspace = true
 nostr-relay-pool.workspace = true
+directories.workspace = true
+toml.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 serde.workspace = true

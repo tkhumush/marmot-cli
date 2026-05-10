@@ -17,8 +17,8 @@ marmot-agent-core  = { path = "crates/marmot-agent-core" }
 marmot-agent-cli   = { path = "crates/marmot-agent-cli" }
 marmot-agent-rpc   = { path = "crates/marmot-agent-rpc" }
 marmot-agent-ffi   = { path = "crates/marmot-agent-ffi" }
-nostr = { version = "0.40", default-features = false, features = ["std", "nip04", "nip59"] }
-nostr-relay-pool = "0.40"
+nostr = { version = "0.44", default-features = false, features = ["std", "nip04", "nip59"] }
+nostr-relay-pool = "0.44"
 mdk-core = { git = "https://github.com/marmot-protocol/mdk.git", branch = "master" }
 mdk-memory-storage = { git = "https://github.com/marmot-protocol/mdk.git", branch = "master" }
 mdk-storage-traits = { git = "https://github.com/marmot-protocol/mdk.git", branch = "master" }
@@ -35,3 +35,5 @@ thiserror = "2.0"
 hex = { version = "0.4", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.11", features = ["v4"] }
+directories = "6.0"
+toml = "0.8"

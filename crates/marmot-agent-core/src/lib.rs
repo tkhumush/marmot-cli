@@ -1,6 +1,8 @@
 
 pub mod identity;
 pub mod relay;
+pub mod storage;
+pub mod context;
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Config {
@@ -27,8 +29,12 @@ pub enum Error {
     Relay(String),
     #[error("identity error: {0}")]
     Identity(String),
+    #[error("storage error: {0}")]
+    Storage(#[from] Box<dyn std::error::Error + Send + Sync>),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("serialization error: {0}")]
+    Serialization(String),
     #[error("anyhow: {0}")]
     Any(#[from] anyhow::Error),
 }
