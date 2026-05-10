@@ -10,7 +10,8 @@
 3. **KeyPackage publishing** — `keypackage publish` generates kind 30443 and publishes to 3 default relays.
 4. **Group creation** — `groups create --name <X> --publish` creates MLS group; with `--publish` sends welcome events to relays.
 5. **DM creation** — `dm create --recipient <npub> --publish` fetches recipient KeyPackage from relays, creates 2-member MLS group; with `--publish` sends evolution_commit + welcome events.
-6. **DM sending** — `dm send --group <hex> --message <msg> --publish` creates kind 445 encrypted message; with `--publish` sends to relays.
+6. **DM sending** — `dm send --group <h-tag-hex> --message <msg> --publish` creates kind 445 encrypted message; resolves `h`-tag (nostr group ID) to internal MLS group ID. With `--publish` sends to relays.
+    - **Note**: The `--group` parameter takes the **nostr group ID** (the 32-byte hex from the `h` tag in published events), NOT the raw MLS group ID.
 7. **Daemon (TCP)** — `daemon --listen 127.0.0.1:9222`. Cross-platform (Unix socket removed).
 
 ### Architecture
@@ -40,7 +41,8 @@
 - [ ] Nix flake or `home-manager` module for dev install
 - [ ] Hermes OpenClaw adapter — JSON-RPC client over TCP connecting to `marmot-cli daemon`
 
-### Security Notes
+### Design Notes
+- **Nostr group ID vs MLS group ID**: MDK stores both. The `h` tag in published events is the `nostr_group_id` (32-byte hex, derived from MLS state hash), while `mls_group_id` is the raw MLS opaque byte vector. The CLI `dm send` command now resolves by `nostr_group_id` via `find_group_by_nostr_id()` so users can copy the visible `h`-tag hex from relay events or `nak req` output.
 - **No secrets in repo**. Identity files and `db.key` live in `~/.local/share/marmot-cli/` (not in git).
 - `.gitignore` excludes `*.nsec`, `*.key`, `*.db`, `Cargo.lock`, `/target`.
 - Relay publish is **opt-in** via `--publish` flag. Events are created + persisted locally by default.
