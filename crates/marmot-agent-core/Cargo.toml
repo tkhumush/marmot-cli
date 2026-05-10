@@ -28,6 +28,7 @@ thiserror.workspace = true
 hex.workspace = true
 chrono.workspace = true
 uuid.workspace = true
+getrandom.workspace = true
 
 [dev-dependencies]
 mdk-memory-storage.workspace = true

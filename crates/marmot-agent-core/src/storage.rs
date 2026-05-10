@@ -7,7 +7,7 @@
 
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tracing::{info, warn};
 
 use crate::identity::Identity;
@@ -56,6 +56,11 @@ impl AgentDirs {
     /// Path to the SQLite database.
     pub fn database_path(&self) -> PathBuf {
         self.data_dir.join("marmot.db")
+    }
+
+    /// Path to the database encryption key.
+    pub fn db_key_path(&self) -> PathBuf {
+        self.data_dir.join("db.key")
     }
 
     /// Path to the daemon socket.
@@ -237,5 +242,43 @@ impl AgentStorage {
         self.config.save(&self.dirs).await?;
         info!("default identity set to '{}'", name);
         Ok(())
+    }
+
+    /// Returns the 32-byte database encryption key, generating and persisting one if absent.
+    /// Key is stored at ~/.local/share/marmot-cli/db.key with 0o600 permissions.
+    pub async fn db_encryption_key(&self) -> Result<[u8; 32]> {
+        let key_path = self.dirs.db_key_path();
+        if key_path.exists() {
+            let hex_str = tokio::fs::read_to_string(&key_path).await?;
+            let hex_str = hex_str.trim();
+            let bytes = hex::decode(hex_str).map_err(|e| {
+                crate::Error::Serialization(format!("invalid db key hex: {}", e))
+            })?;
+            if bytes.len() != 32 {
+                return Err(crate::Error::Serialization(
+                    "db key must be 32 bytes".to_string(),
+                ));
+            }
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&bytes);
+            return Ok(key);
+        }
+
+        // Generate new key
+        let mut key = [0u8; 32];
+        getrandom::getrandom(&mut key).map_err(|e| {
+            crate::Error::Storage(format!("failed to generate db key: {}", e).into())
+        })?;
+
+        // Write with 0o600 perms
+        tokio::fs::write(&key_path, hex::encode(key)).await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            tokio::fs::set_permissions(&key_path, perms).await?;
+        }
+
+        Ok(key)
     }
 }

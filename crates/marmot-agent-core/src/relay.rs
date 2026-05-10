@@ -1,5 +1,5 @@
-use nostr::{Event, RelayUrl};
-use nostr_relay_pool::{RelayPool, RelayOptions};
+use nostr::{Event, Filter, Kind, PublicKey, RelayUrl};
+use nostr_relay_pool::{relay::ReqExitPolicy, RelayPool, RelayOptions};
 use tracing::{info, warn};
 
 use crate::Result;
@@ -56,4 +56,47 @@ pub async fn publish_event(
 
     pool.disconnect().await;
     Ok(results)
+}
+
+/// Fetch the latest KeyPackage event (kind 30443) for a given user from relays.
+pub async fn fetch_keypackage(
+    pubkey: PublicKey,
+    relays: &[&str],
+) -> Result<Option<Event>> {
+    let pool = RelayPool::default();
+
+    for url in relays {
+        match RelayUrl::parse(url) {
+            Ok(relay_url) => {
+                if let Err(e) = pool.add_relay(relay_url, RelayOptions::default()).await {
+                    warn!("failed to add relay {}: {}", url, e);
+                }
+            }
+            Err(e) => {
+                warn!("invalid relay URL {}: {}", url, e);
+            }
+        }
+    }
+
+    pool.connect().await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(30443))
+        .author(pubkey);
+
+    let events = match pool.fetch_events(
+        vec![filter],
+        std::time::Duration::from_secs(5),
+        ReqExitPolicy::ExitOnEOSE,
+    ).await {
+        Ok(events) => events.to_vec(),
+        Err(e) => {
+            warn!("Failed to query keypackage: {}", e);
+            return Ok(None);
+        }
+    };
+
+    pool.disconnect().await;
+    Ok(events.into_iter().next())
 }

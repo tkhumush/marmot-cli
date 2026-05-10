@@ -1,8 +1,8 @@
 use mdk_core::prelude::*;
 use mdk_core::key_packages::KeyPackageEventData;
-use mdk_memory_storage::MdkMemoryStorage;
-use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl};
-use tracing::info;
+use mdk_sqlite_storage::MdkSqliteStorage;
+use mdk_sqlite_storage::EncryptionConfig;
+use nostr::{Event, EventBuilder, Kind, RelayUrl, UnsignedEvent};
 
 use crate::identity::Identity;
 use crate::storage::AgentStorage;
@@ -10,7 +10,7 @@ use crate::Result;
 
 /// Agent context wraps MDK + storage + relay connectivity.
 pub struct AgentContext {
-    pub mdk: MDK<MdkMemoryStorage>,
+    pub mdk: MDK<MdkSqliteStorage>,
     pub storage: AgentStorage,
     pub identity: Identity,
 }
@@ -19,7 +19,15 @@ impl AgentContext {
     /// Initialize with a named identity from storage.
     pub async fn with_identity(storage: AgentStorage, name: &str) -> Result<Self> {
         let identity = storage.load_identity(name).await?;
-        let mdk = MDK::new(MdkMemoryStorage::default());
+        let db_path = storage.dirs.database_path();
+        let db_key = storage.db_encryption_key().await?;
+        let mdk = MDK::new(
+            MdkSqliteStorage::new_with_key(
+                &db_path,
+                EncryptionConfig::new(db_key),
+            )
+            .map_err(|e| crate::Error::Storage(format!("sqlite init failed: {}", e).into()))?,
+        );
         Ok(Self {
             mdk,
             storage,
@@ -30,8 +38,15 @@ impl AgentContext {
     /// Initialize with the default identity.
     pub async fn with_default(storage: AgentStorage) -> Result<Option<Self>> {
         if let Some(identity) = storage.default_identity().await? {
-            let name = identity.name.clone().unwrap_or_default();
-            let mdk = MDK::new(MdkMemoryStorage::default());
+            let db_path = storage.dirs.database_path();
+            let db_key = storage.db_encryption_key().await?;
+            let mdk = MDK::new(
+                MdkSqliteStorage::new_with_key(
+                    &db_path,
+                    EncryptionConfig::new(db_key),
+                )
+                .map_err(|e| crate::Error::Storage(format!("sqlite init failed: {}", e).into()))?,
+            );
             Ok(Some(Self {
                 mdk,
                 storage,
@@ -43,7 +58,8 @@ impl AgentContext {
     }
 
     /// Create a KeyPackage event (kind 30443) ready for relay publishing.
-    pub fn create_keypackage(&self,
+    pub fn create_keypackage(
+        &self,
         relays: Vec<RelayUrl>,
     ) -> Result<KeyPackageEventData> {
         let data = self
@@ -54,9 +70,7 @@ impl AgentContext {
     }
 
     /// Sign a KeyPackage event for publishing.
-    pub fn sign_keypackage_event(&self,
-        data: &KeyPackageEventData,
-    ) -> Result<Event> {
+    pub fn sign_keypackage_event(&self, data: &KeyPackageEventData) -> Result<Event> {
         let kind = Kind::Custom(30443);
         let event = EventBuilder::new(kind, data.content.clone())
             .tags(data.tags_30443.clone())
@@ -75,7 +89,7 @@ impl AgentContext {
         self.identity.public_key_hex()
     }
 
-    /// Create a new MLS group.
+    /// Create a new MLS group (e.g., for DMs or groups).
     pub fn create_group(
         &self,
         name: &str,
@@ -83,11 +97,11 @@ impl AgentContext {
     ) -> Result<GroupResult> {
         let config = NostrGroupConfigData::new(
             name.to_string(),
-            "".to_string(), // description
-            None, None, None, // image
+            "".to_string(),               // description
+            None, None, None,             // image
             relays,
             vec![self.identity.keys.public_key()], // admins
-            None, // disappearing messages
+            None,                         // disappearing messages
         );
         let result = self
             .mdk
@@ -107,5 +121,58 @@ impl AgentContext {
             .get_groups()
             .map_err(|e| crate::Error::Identity(format!("storage error: {}", e)))?;
         Ok(groups)
+    }
+
+    /// Start a DM with someone by their KeyPackage event.
+    /// Creates a 2-member MLS group. Returns the UpdateGroupResult
+    /// which contains the commit_event + welcome_rumors to publish.
+    pub fn create_dm(
+        &self,
+        name: &str,
+        relays: Vec<RelayUrl>,
+        member_keypackage_event: &Event,
+    ) -> Result<UpdateGroupResult> {
+        // 1. Create the group
+        let group_result = self.create_group(name, relays)?;
+        let mls_group_id = group_result.group.mls_group_id.clone();
+
+        // 2. Parse their KeyPackage (just to verify it's valid before add_members)
+        let _kp = self
+            .mdk
+            .parse_key_package(member_keypackage_event)
+            .map_err(|e| crate::Error::Identity(format!("KeyPackage parse failed: {}", e)))?;
+
+        // 3. Add them to the group
+        let update_result = self
+            .mdk
+            .add_members(&mls_group_id, &[member_keypackage_event.clone()])
+            .map_err(|e| {
+                if e.to_string().contains("InviteeMissingRequiredProposal") {
+                    crate::Error::Identity(
+                        "Invitee's KeyPackage is missing required MLS proposals".to_string(),
+                    )
+                } else {
+                    crate::Error::Identity(format!("add member failed: {}", e))
+                }
+            })?;
+
+        Ok(update_result)
+    }
+
+    /// Build an encrypted Direct Message (MLS application message) as a kind 445 Nostr event.
+    pub fn create_dm_message(
+        &self,
+        mls_group_id: &GroupId,
+        content: &str,
+    ) -> Result<Event> {
+        let rumor: UnsignedEvent = EventBuilder::new(Kind::TextNote, content)
+            .build(self.identity.keys.public_key());
+
+        let event = self
+            .mdk
+            .create_message(mls_group_id, rumor, None)
+            .map_err(|e| crate::Error::Identity(format!("DM creation failed: {}", e)))?;
+
+        Ok(event)
     }
 }

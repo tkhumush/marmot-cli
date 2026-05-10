@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 use std::sync::Arc;
 use tracing::Level;
+use nostr::PublicKey;
+use mdk_core::GroupId;
 
 #[derive(Parser)]
 #[command(name = "marmot-cli")]
@@ -40,6 +42,11 @@ enum Commands {
     Groups {
         #[command(subcommand)]
         action: GroupAction,
+    },
+    /// Direct message (DM) — creates a 2-member group.
+    Dm {
+        #[command(subcommand)]
+        action: DmAction,
     },
 }
 
@@ -93,6 +100,24 @@ enum GroupAction {
         group: String,
         #[arg(short, long, help = "Member npub")]
         member: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum DmAction {
+    /// Start a DM with someone by npub.
+    Create {
+        #[arg(short, long, help = "Recipient npub")]
+        recipient: String,
+    },
+    /// List all conversation groups.
+    List,
+    /// Send a message to a DM group.
+    Send {
+        #[arg(short, long, help = "Group ID (hex or npub of recipient)")]
+        group: String,
+        #[arg(short, long, help = "Message content")]
+        message: String,
     },
 }
 
@@ -404,6 +429,150 @@ async fn main() {
             }
             GroupAction::Invite { group, member } => {
                 println!("Inviting {} to group {}... (not yet implemented)", member, group);
+            }
+        },
+        Commands::Dm { action } => match action {
+            DmAction::Create { recipient } => {
+                let storage = match marmot_agent_core::storage::AgentStorage::init().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("Failed to initialize storage: {}", e);
+                        return;
+                    }
+                };
+
+                let ctx = match marmot_agent_core::context::AgentContext::with_default(storage).await {
+                    Ok(Some(c)) => c,
+                    Ok(None) => {
+                        eprintln!("No default identity set.");
+                        return;
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to load agent context: {}", e);
+                        return;
+                    }
+                };
+
+                // Parse recipient npub
+                let recipient_pk = match PublicKey::parse(&recipient) {
+                    Ok(pk) => pk,
+                    Err(e) => {
+                        eprintln!("Invalid npub '{}': {}", recipient, e);
+                        return;
+                    }
+                };
+
+                println!("Fetching KeyPackage for {}...", recipient);
+                let kp_event = match marmot_agent_core::relay::fetch_keypackage(
+                    recipient_pk,
+                    &marmot_agent_core::relay::DEFAULT_RELAYS,
+                ).await {
+                    Ok(Some(e)) => e,
+                    Ok(None) => {
+                        eprintln!("No KeyPackage found for {}. Ask them to publish one first.", recipient);
+                        return;
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to fetch KeyPackage: {}", e);
+                        return;
+                    }
+                };
+
+                let relays: Vec<nostr::RelayUrl> = marmot_agent_core::relay::DEFAULT_RELAYS
+                    .iter()
+                    .filter_map(|url| nostr::RelayUrl::parse(url).ok())
+                    .collect();
+
+                println!("Creating DM group with {}...", recipient);
+                let result = match ctx.create_dm(&format!("dm:{}", recipient), relays, &kp_event) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("DM creation failed: {}", e);
+                        return;
+                    }
+                };
+
+                println!("DM group created!");
+                println!("  Commit event ID: {}", result.evolution_event.id);
+                println!("  Welcome rumors: {}", result.welcome_rumors.as_ref().map(|w| w.len()).unwrap_or(0));
+                println!("\n  NOTE: Events not published. Use relay publish commands to send them.");
+            }
+            DmAction::List => {
+                let storage = match marmot_agent_core::storage::AgentStorage::init().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("Failed to initialize storage: {}", e);
+                        return;
+                    }
+                };
+
+                let ctx = match marmot_agent_core::context::AgentContext::with_default(storage).await {
+                    Ok(Some(c)) => c,
+                    Ok(None) => {
+                        eprintln!("No default identity set.");
+                        return;
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to load agent context: {}", e);
+                        return;
+                    }
+                };
+
+                match ctx.list_groups() {
+                    Ok(groups) => {
+                        if groups.is_empty() {
+                            println!("No conversations found.");
+                        } else {
+                            println!("Conversations:");
+                            for g in groups {
+                                let name = if g.name.is_empty() { "unnamed" } else { &g.name };
+                                println!("  '{}' (id: {:?})", name, g.mls_group_id);
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("Failed to list conversations: {}", e),
+                }
+            }
+            DmAction::Send { group, message } => {
+                let storage = match marmot_agent_core::storage::AgentStorage::init().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("Failed to initialize storage: {}", e);
+                        return;
+                    }
+                };
+
+                let ctx = match marmot_agent_core::context::AgentContext::with_default(storage).await {
+                    Ok(Some(c)) => c,
+                    Ok(None) => {
+                        eprintln!("No default identity set.");
+                        return;
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to load agent context: {}", e);
+                        return;
+                    }
+                };
+
+                // Parse group ID from hex string
+                let group_id_bytes = match hex::decode(&group) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("Invalid group ID (expected hex): {}", e);
+                        return;
+                    }
+                };
+                let group_id = GroupId::from_slice(&group_id_bytes);
+
+                match ctx.create_dm_message(&group_id, &message) {
+                    Ok(event) => {
+                        println!("Encrypted message created!");
+                        println!("  Event ID: {}", event.id);
+                        println!("  Kind: {}", event.kind);
+                        println!("\n  NOTE: Not published. Use relay publish to send.");
+                    }
+                    Err(e) => eprintln!("Message creation failed: {}", e),
+                }
             }
         },
     }
