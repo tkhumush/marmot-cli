@@ -15,8 +15,8 @@ name = "marmot-cli"
 path = "src/main.rs"
 
 [dependencies]
-marmot-agent-core = { workspace = true, path = "../marmot-agent-core" }
-marmot-agent-rpc = { workspace = true, path = "../marmot-agent-rpc" }
+marmot-agent-core = { workspace = true }
+marmot-agent-rpc = { workspace = true }
 clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true

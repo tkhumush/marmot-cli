@@ -1,7 +1,4 @@
-use nostr::Keys;
-use nostr::key::SecretKey;
-use nostr::secp256k1::rand::rngs::OsRng;
-use nostr::secp256k1::rand::RngCore;
+use nostr::{Keys, ToBech32};
 use std::path::Path;
 use tracing::{info, warn};
 use crate::Result;

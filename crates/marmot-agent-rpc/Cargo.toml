@@ -11,7 +11,7 @@ rust-version.workspace = true
 description = "JSON-RPC and gRPC server interfaces for marmot-agent"
 
 [dependencies]
-marmot-agent-core = { workspace = true, path = "../marmot-agent-core" }
+marmot-agent-core = { workspace = true }
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
