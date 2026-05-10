@@ -127,6 +127,33 @@ enum DmAction {
     },
 }
 
+async fn load_storage() -> Option<marmot_agent_core::storage::AgentStorage> {
+    match marmot_agent_core::storage::AgentStorage::init().await {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("error: failed to initialize storage: {e}");
+            None
+        }
+    }
+}
+
+async fn load_default_context() -> Option<marmot_agent_core::context::AgentContext> {
+    let storage = load_storage().await?;
+    match marmot_agent_core::context::AgentContext::with_default(storage).await {
+        Ok(Some(c)) => Some(c),
+        Ok(None) => {
+            eprintln!("No default identity set.");
+            eprintln!("  Create one:  marmot-cli identity create --name <name>");
+            eprintln!("  Set default: marmot-cli identity set-default <name>");
+            None
+        }
+        Err(e) => {
+            eprintln!("error: failed to load agent context: {e}");
+            None
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -139,13 +166,7 @@ async fn main() {
     match cli.command {
         Commands::Identity { action } => match action {
             IdentityAction::Create { name } => {
-                let storage = match marmot_agent_core::storage::AgentStorage::init().await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("Failed to initialize storage: {}", e);
-                        return;
-                    }
-                };
+                let Some(storage) = load_storage().await else { return; };
 
                 let id = if let Some(n) = name {
                     marmot_agent_core::identity::Identity::generate_named(n)
@@ -165,13 +186,7 @@ async fn main() {
                 println!("\n  Saved to: {}", storage.dirs.identities_dir().display());
             }
             IdentityAction::List => {
-                let storage = match marmot_agent_core::storage::AgentStorage::init().await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("Failed to initialize storage: {}", e);
-                        return;
-                    }
-                };
+                let Some(storage) = load_storage().await else { return; };
 
                 match storage.list_identities().await {
                     Ok(records) => {
@@ -196,13 +211,7 @@ async fn main() {
                 }
             }
             IdentityAction::Show { name } => {
-                let storage = match marmot_agent_core::storage::AgentStorage::init().await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("Failed to initialize storage: {}", e);
-                        return;
-                    }
-                };
+                let Some(storage) = load_storage().await else { return; };
 
                 match storage.load_identity(&name).await {
                     Ok(id) => {
@@ -215,13 +224,7 @@ async fn main() {
                 }
             }
             IdentityAction::Delete { name } => {
-                let storage = match marmot_agent_core::storage::AgentStorage::init().await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("Failed to initialize storage: {}", e);
-                        return;
-                    }
-                };
+                let Some(storage) = load_storage().await else { return; };
 
                 if let Err(e) = storage.delete_identity(&name).await {
                     eprintln!("Failed to delete identity '{}': {}", name, e);
@@ -230,13 +233,7 @@ async fn main() {
                 }
             }
             IdentityAction::SetDefault { name } => {
-                let mut storage = match marmot_agent_core::storage::AgentStorage::init().await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("Failed to initialize storage: {}", e);
-                        return;
-                    }
-                };
+                let Some(mut storage) = load_storage().await else { return; };
 
                 if let Err(e) = storage.set_default_identity(&name).await {
                     eprintln!("Failed to set default identity: {}", e);
@@ -258,27 +255,7 @@ async fn main() {
         },
         Commands::Keypackage { action } => match action {
             KeypackageAction::Publish => {
-                let storage = match marmot_agent_core::storage::AgentStorage::init().await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("Failed to initialize storage: {}", e);
-                        return;
-                    }
-                };
-
-                let ctx = match marmot_agent_core::context::AgentContext::with_default(storage).await {
-                    Ok(Some(c)) => c,
-                    Ok(None) => {
-                        eprintln!("No default identity set.");
-                        eprintln!("  Create one:  marmot-cli identity create --name <name>");
-                        eprintln!("  Set default: marmot-cli identity set-default <name>");
-                        return;
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to load agent context: {}", e);
-                        return;
-                    }
-                };
+                let Some(ctx) = load_default_context().await else { return; };
 
                 // Parse default relays
                 let relays: Vec<nostr::RelayUrl> = marmot_agent_core::relay::DEFAULT_RELAYS
@@ -368,25 +345,7 @@ async fn main() {
         }
         Commands::Groups { action } => match action {
             GroupAction::List => {
-                let storage = match marmot_agent_core::storage::AgentStorage::init().await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("Failed to initialize storage: {}", e);
-                        return;
-                    }
-                };
-
-                let ctx = match marmot_agent_core::context::AgentContext::with_default(storage).await {
-                    Ok(Some(c)) => c,
-                    Ok(None) => {
-                        eprintln!("No default identity set.");
-                        return;
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to load agent context: {}", e);
-                        return;
-                    }
-                };
+                let Some(ctx) = load_default_context().await else { return; };
 
                 match ctx.list_groups() {
                     Ok(groups) => {
@@ -404,25 +363,7 @@ async fn main() {
                 }
             }
             GroupAction::Create { name, publish } => {
-                let storage = match marmot_agent_core::storage::AgentStorage::init().await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("Failed to initialize storage: {}", e);
-                        return;
-                    }
-                };
-
-                let ctx = match marmot_agent_core::context::AgentContext::with_default(storage).await {
-                    Ok(Some(c)) => c,
-                    Ok(None) => {
-                        eprintln!("No default identity set.");
-                        return;
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to load agent context: {}", e);
-                        return;
-                    }
-                };
+                let Some(ctx) = load_default_context().await else { return; };
 
                 let relays: Vec<nostr::RelayUrl> = marmot_agent_core::relay::DEFAULT_RELAYS
                     .iter()
@@ -495,25 +436,7 @@ async fn main() {
         },
         Commands::Dm { action } => match action {
             DmAction::Create { recipient, publish } => {
-                let storage = match marmot_agent_core::storage::AgentStorage::init().await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("Failed to initialize storage: {}", e);
-                        return;
-                    }
-                };
-
-                let ctx = match marmot_agent_core::context::AgentContext::with_default(storage).await {
-                    Ok(Some(c)) => c,
-                    Ok(None) => {
-                        eprintln!("No default identity set.");
-                        return;
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to load agent context: {}", e);
-                        return;
-                    }
-                };
+                let Some(ctx) = load_default_context().await else { return; };
 
                 // Parse recipient npub
                 let recipient_pk = match PublicKey::parse(&recipient) {
@@ -597,25 +520,7 @@ async fn main() {
                 }
             }
             DmAction::List => {
-                let storage = match marmot_agent_core::storage::AgentStorage::init().await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("Failed to initialize storage: {}", e);
-                        return;
-                    }
-                };
-
-                let ctx = match marmot_agent_core::context::AgentContext::with_default(storage).await {
-                    Ok(Some(c)) => c,
-                    Ok(None) => {
-                        eprintln!("No default identity set.");
-                        return;
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to load agent context: {}", e);
-                        return;
-                    }
-                };
+                let Some(ctx) = load_default_context().await else { return; };
 
                 match ctx.list_groups() {
                     Ok(groups) => {
@@ -633,25 +538,7 @@ async fn main() {
                 }
             }
             DmAction::Send { group, message, publish } => {
-                let storage = match marmot_agent_core::storage::AgentStorage::init().await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("Failed to initialize storage: {}", e);
-                        return;
-                    }
-                };
-
-                let ctx = match marmot_agent_core::context::AgentContext::with_default(storage).await {
-                    Ok(Some(c)) => c,
-                    Ok(None) => {
-                        eprintln!("No default identity set.");
-                        return;
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to load agent context: {}", e);
-                        return;
-                    }
-                };
+                let Some(ctx) = load_default_context().await else { return; };
 
                 match ctx.find_group_by_nostr_id(&group) {
                     Ok(Some(g)) => {
