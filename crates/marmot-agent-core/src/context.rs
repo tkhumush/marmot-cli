@@ -2,7 +2,9 @@ use mdk_core::prelude::*;
 use mdk_core::key_packages::KeyPackageEventData;
 use mdk_sqlite_storage::MdkSqliteStorage;
 use mdk_sqlite_storage::EncryptionConfig;
-use nostr::{Event, EventBuilder, Kind, RelayUrl, UnsignedEvent};
+use mdk_storage_traits::groups::Pagination;
+use nostr::{Event, EventBuilder, Kind, PublicKey, RelayUrl, ToBech32, UnsignedEvent};
+use std::collections::BTreeSet;
 
 use crate::identity::Identity;
 use crate::storage::AgentStorage;
@@ -142,14 +144,12 @@ impl AgentContext {
             .parse_key_package(member_keypackage_event)
             .map_err(|e| crate::Error::Identity(format!("KeyPackage parse failed: {}", e)))?;
 
-        // 3. Add them to the group.
-        // NOTE: if add_members fails the group created above remains in storage with no
-        // members. MDK does not currently expose a delete_group API, so callers should
-        // treat a create_dm error as potentially leaving a stranded empty group.
+        // 3. Add them to the group. On failure, clean up the group created above.
         let update_result = self
             .mdk
             .add_members(&mls_group_id, &[member_keypackage_event.clone()])
             .map_err(|e| {
+                let _ = self.mdk.delete_group(&mls_group_id);
                 if e.to_string().contains("InviteeMissingRequiredProposal") {
                     crate::Error::Group(
                         "Invitee's KeyPackage is missing required MLS proposals".to_string(),
@@ -230,5 +230,71 @@ impl AgentContext {
         }
 
         Ok(events)
+    }
+
+    /// Process an incoming encrypted Nostr event (kind 445 / commit / proposal).
+    /// Decrypts application messages and stores them; advances MLS epoch on commits.
+    pub fn process_incoming_event(&self, event: &Event) -> Result<MessageProcessingResult> {
+        self.mdk
+            .process_message(event)
+            .map_err(|e| crate::Error::Group(format!("failed to process event: {}", e)))
+    }
+
+    /// Retrieve stored decrypted messages for a group, newest first.
+    pub fn get_messages_for_group(
+        &self,
+        mls_group_id: &GroupId,
+        limit: usize,
+    ) -> Result<Vec<message_types::Message>> {
+        self.mdk
+            .get_messages(mls_group_id, Some(Pagination::new(Some(limit), Some(0))))
+            .map_err(|e| crate::Error::Group(format!("failed to get messages: {}", e)))
+    }
+
+    /// Return the set of member public keys for a group.
+    pub fn get_members_for_group(
+        &self,
+        mls_group_id: &GroupId,
+    ) -> Result<BTreeSet<PublicKey>> {
+        self.mdk
+            .get_members(mls_group_id)
+            .map_err(|e| crate::Error::Group(format!("failed to get members: {}", e)))
+    }
+
+    /// Add a member to an existing group (invite flow — admin side).
+    /// Returns the UpdateGroupResult with events to publish.
+    pub fn invite_member_to_group(
+        &self,
+        mls_group_id: &GroupId,
+        member_keypackage_event: &Event,
+    ) -> Result<UpdateGroupResult> {
+        self.mdk
+            .add_members(mls_group_id, &[member_keypackage_event.clone()])
+            .map_err(|e| {
+                if e.to_string().contains("InviteeMissingRequiredProposal") {
+                    crate::Error::Group(
+                        "Invitee's KeyPackage is missing required MLS proposals".to_string(),
+                    )
+                } else {
+                    crate::Error::Group(format!("add member failed: {}", e))
+                }
+            })
+    }
+
+    /// Delete a group from local storage (removes all associated MLS state).
+    pub fn delete_group(&self, mls_group_id: &GroupId) -> Result<()> {
+        self.mdk
+            .delete_group(mls_group_id)
+            .map_err(|e| crate::Error::Group(format!("failed to delete group: {}", e)))
+    }
+
+    /// Return the nostr_group_id (h-tag hex) for display.
+    pub fn nostr_group_id_hex(group: &group_types::Group) -> String {
+        hex::encode(group.nostr_group_id)
+    }
+
+    /// Format a member PublicKey as npub for display.
+    pub fn member_npub(pk: &PublicKey) -> String {
+        pk.to_bech32().expect("valid public key always encodes to bech32")
     }
 }
