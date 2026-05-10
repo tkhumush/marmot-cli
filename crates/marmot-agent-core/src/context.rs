@@ -4,6 +4,7 @@ use mdk_sqlite_storage::MdkSqliteStorage;
 use mdk_sqlite_storage::EncryptionConfig;
 use mdk_storage_traits::groups::Pagination;
 use nostr::{Event, EventBuilder, Kind, PublicKey, RelayUrl, ToBech32, UnsignedEvent};
+use nostr::nips::nip59;
 use std::collections::BTreeSet;
 
 use crate::identity::Identity;
@@ -296,5 +297,57 @@ impl AgentContext {
     /// Format a member PublicKey as npub for display.
     pub fn member_npub(pk: &PublicKey) -> String {
         pk.to_bech32().expect("valid public key always encodes to bech32")
+    }
+
+    /// Unwrap a NIP-59 gift-wrap event and store it as a pending welcome if it carries a
+    /// kind 444 (MlsWelcome) rumor. Returns `None` for non-welcome gift wraps.
+    pub async fn unwrap_and_process_welcome(
+        &self,
+        gift_wrap: &Event,
+    ) -> Result<Option<welcome_types::Welcome>> {
+        let unwrapped = nip59::extract_rumor(&self.identity.keys, gift_wrap)
+            .await
+            .map_err(|e| crate::Error::Group(format!("NIP-59 unwrap failed: {}", e)))?;
+
+        if unwrapped.rumor.kind != Kind::MlsWelcome {
+            return Ok(None);
+        }
+
+        let welcome = self
+            .mdk
+            .process_welcome(&gift_wrap.id, &unwrapped.rumor)
+            .map_err(|e| crate::Error::Group(format!("process_welcome failed: {}", e)))?;
+
+        Ok(Some(welcome))
+    }
+
+    /// List all pending welcomes stored locally (kind 444 events not yet accepted/declined).
+    pub fn list_pending_welcomes(&self) -> Result<Vec<welcome_types::Welcome>> {
+        self.mdk
+            .get_pending_welcomes(None)
+            .map_err(|e| crate::Error::Group(format!("get_pending_welcomes failed: {}", e)))
+    }
+
+    /// Accept a pending welcome, joining the associated MLS group.
+    pub fn accept_welcome(&self, welcome: &welcome_types::Welcome) -> Result<()> {
+        self.mdk
+            .accept_welcome(welcome)
+            .map_err(|e| crate::Error::Group(format!("accept_welcome failed: {}", e)))
+    }
+
+    /// Return the IDs of groups that need a self-update commit (key rotation).
+    /// Pass `threshold_secs = 0` to get all groups needing an update.
+    pub fn groups_needing_self_update(&self, threshold_secs: u64) -> Result<Vec<GroupId>> {
+        self.mdk
+            .groups_needing_self_update(threshold_secs)
+            .map_err(|e| crate::Error::Group(format!("groups_needing_self_update failed: {}", e)))
+    }
+
+    /// Perform a self-update commit for a group (rotates our leaf key).
+    /// Returns the UpdateGroupResult containing the evolution event to publish.
+    pub fn self_update_group(&self, mls_group_id: &GroupId) -> Result<UpdateGroupResult> {
+        self.mdk
+            .self_update(mls_group_id)
+            .map_err(|e| crate::Error::Group(format!("self_update failed: {}", e)))
     }
 }

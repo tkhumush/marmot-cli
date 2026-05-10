@@ -127,6 +127,13 @@ enum GroupAction {
         #[arg(short, long, help = "Number of messages to show", default_value = "20")]
         limit: usize,
     },
+    /// List pending group invitations (welcome messages not yet accepted).
+    Pending,
+    /// Accept all pending group invitations and perform a self-update key rotation.
+    Join {
+        #[arg(long, help = "Publish self-update commit events to relays after joining")]
+        publish: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -334,7 +341,27 @@ async fn main() {
                 }
             }
             KeypackageAction::Show => {
-                println!("KeyPackage info... (not yet implemented)");
+                let Some(ctx) = load_default_context().await else { return; };
+
+                let pubkey = ctx.identity.keys.public_key();
+                println!("Fetching your KeyPackage from relays...");
+                match marmot_agent_core::relay::fetch_keypackage(
+                    pubkey,
+                    &marmot_agent_core::relay::DEFAULT_RELAYS,
+                ).await {
+                    Ok(Some(event)) => {
+                        println!("KeyPackage found:");
+                        println!("  npub:      {}", ctx.npub());
+                        println!("  event ID:  {}", event.id);
+                        println!("  kind:      {}", event.kind);
+                        println!("  created:   {}", event.created_at);
+                    }
+                    Ok(None) => {
+                        println!("No KeyPackage found for {}.", ctx.npub());
+                        println!("  Publish one with: marmot-cli keypackage publish");
+                    }
+                    Err(e) => eprintln!("Failed to fetch KeyPackage: {}", e),
+                }
             }
         },
         Commands::Daemon { listen } => {
@@ -573,6 +600,104 @@ async fn main() {
                     Err(e) => eprintln!("Failed to get messages: {e}"),
                 }
             }
+            GroupAction::Pending => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                match ctx.list_pending_welcomes() {
+                    Ok(welcomes) => {
+                        if welcomes.is_empty() {
+                            println!("No pending group invitations.");
+                            println!("  Run 'receive' to fetch new invitations from relays.");
+                        } else {
+                            println!("Pending group invitations ({}):", welcomes.len());
+                            for (i, w) in welcomes.iter().enumerate() {
+                                println!("  [{}] nostr group: {}", i + 1, hex::encode(w.nostr_group_id));
+                            }
+                            println!("\nRun 'groups join' to accept all pending invitations.");
+                        }
+                    }
+                    Err(e) => eprintln!("Failed to list pending welcomes: {e}"),
+                }
+            }
+            GroupAction::Join { publish } => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                let welcomes = match ctx.list_pending_welcomes() {
+                    Ok(w) => w,
+                    Err(e) => { eprintln!("Failed to list pending welcomes: {e}"); return; }
+                };
+
+                if welcomes.is_empty() {
+                    println!("No pending group invitations to accept.");
+                    println!("  Run 'receive' to fetch new invitations from relays.");
+                    return;
+                }
+
+                println!("Accepting {} pending invitation(s)...", welcomes.len());
+                let mut accepted = 0usize;
+                for welcome in &welcomes {
+                    let nostr_id = hex::encode(welcome.nostr_group_id);
+                    match ctx.accept_welcome(welcome) {
+                        Ok(()) => {
+                            println!("  Joined group: {}", nostr_id);
+                            accepted += 1;
+                        }
+                        Err(e) => eprintln!("  Failed to join {}: {e}", nostr_id),
+                    }
+                }
+
+                if accepted == 0 {
+                    return;
+                }
+
+                // Run self-update on all groups that need a key rotation after joining.
+                let needing_update = match ctx.groups_needing_self_update(0) {
+                    Ok(ids) => ids,
+                    Err(e) => {
+                        eprintln!("Failed to check groups needing self-update: {e}");
+                        return;
+                    }
+                };
+
+                if needing_update.is_empty() {
+                    println!("\nNo self-update needed.");
+                    return;
+                }
+
+                println!("\nRunning self-update for {} group(s)...", needing_update.len());
+                for group_id in &needing_update {
+                    match ctx.self_update_group(group_id) {
+                        Ok(result) => {
+                            println!("  Self-update commit: {}", result.evolution_event.id);
+
+                            if publish {
+                                let to_publish = match ctx.prepare_group_update_events(&result) {
+                                    Ok(e) => e,
+                                    Err(e) => { eprintln!("  Failed to prepare events: {e}"); continue; }
+                                };
+                                let refs: Vec<(&str, &Event)> = to_publish.iter().map(|(l, e)| (*l, e)).collect();
+                                match marmot_agent_core::relay::publish_events(
+                                    &refs,
+                                    &marmot_agent_core::relay::DEFAULT_RELAYS,
+                                ).await {
+                                    Ok(results) => {
+                                        for (label, relay_results) in results {
+                                            let ok = relay_results.iter().filter(|(_, ok)| *ok).count();
+                                            println!("    {}: {}/{} relays OK", label, ok, relay_results.len());
+                                        }
+                                    }
+                                    Err(e) => eprintln!("  Publish failed: {e}"),
+                                }
+                            }
+                        }
+                        Err(e) => eprintln!("  Self-update failed: {e}"),
+                    }
+                }
+
+                if !publish {
+                    println!("  NOTE: Use --publish to send self-update commits to relays.");
+                }
+            }
         },
         Commands::Dm { action } => match action {
             DmAction::Create { recipient, publish } => {
@@ -759,20 +884,19 @@ async fn main() {
                 Err(e) => { eprintln!("Failed to list groups: {e}"); return; }
             };
 
-            if groups.is_empty() {
-                println!("No groups found. Create or join a group first.");
-                return;
-            }
-
             // Collect h-tags (nostr group IDs) for all known groups
             let h_tags: Vec<String> = groups.iter()
                 .map(|g| hex::encode(g.nostr_group_id))
                 .collect();
 
-            println!("Checking {} group(s)...", groups.len());
+            if !h_tags.is_empty() {
+                println!("Checking {} known group(s)...", groups.len());
+            }
 
-            let events = if offline {
+            let group_events = if offline {
                 println!("  (offline mode — skipping relay fetch)");
+                vec![]
+            } else if h_tags.is_empty() {
                 vec![]
             } else {
                 match marmot_agent_core::relay::fetch_group_events(
@@ -781,11 +905,11 @@ async fn main() {
                     &marmot_agent_core::relay::DEFAULT_RELAYS,
                 ).await {
                     Ok(evs) => {
-                        println!("  Fetched {} event(s) from relays.", evs.len());
+                        println!("  Fetched {} group event(s) from relays.", evs.len());
                         evs
                     }
                     Err(e) => {
-                        eprintln!("Failed to fetch events: {e}");
+                        eprintln!("Failed to fetch group events: {e}");
                         return;
                     }
                 }
@@ -795,7 +919,7 @@ async fn main() {
             let mut commits = 0usize;
             let mut skipped = 0usize;
 
-            for event in &events {
+            for event in &group_events {
                 match ctx.process_incoming_event(event) {
                     Ok(MessageProcessingResult::ApplicationMessage(_)) => {
                         new_messages += 1;
@@ -813,10 +937,45 @@ async fn main() {
                 }
             }
 
+            // Fetch gift-wrap events (kind 1059) addressed to us — these carry welcome invites.
+            let gift_wrap_events = if offline {
+                vec![]
+            } else {
+                println!("Checking for group invitations (gift wraps)...");
+                match marmot_agent_core::relay::fetch_gift_wrap_events(
+                    ctx.identity.keys.public_key(),
+                    &marmot_agent_core::relay::DEFAULT_RELAYS,
+                ).await {
+                    Ok(evs) => {
+                        println!("  Fetched {} gift-wrap event(s) from relays.", evs.len());
+                        evs
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to fetch gift-wrap events: {e}");
+                        vec![]
+                    }
+                }
+            };
+
+            let mut new_welcomes = 0usize;
+            for gift_wrap in &gift_wrap_events {
+                match ctx.unwrap_and_process_welcome(gift_wrap).await {
+                    Ok(Some(_)) => new_welcomes += 1,
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!("failed to process gift wrap {}: {}", gift_wrap.id, e);
+                    }
+                }
+            }
+
             println!("Done.");
             println!("  {} new message(s)", new_messages);
             if commits > 0 { println!("  {} MLS commit(s) applied", commits); }
             if skipped > 0 { println!("  {} event(s) skipped (already processed or unrecognised)", skipped); }
+            if new_welcomes > 0 {
+                println!("  {} new group invitation(s) received", new_welcomes);
+                println!("\nRun 'groups pending' to review, then 'groups join' to accept.");
+            }
             if new_messages > 0 {
                 println!("\nRun 'groups messages --group <id>' or 'dm messages --group <id>' to read.");
             }
