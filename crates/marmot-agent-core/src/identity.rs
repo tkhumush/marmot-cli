@@ -1,6 +1,6 @@
 use nostr::{Keys, ToBech32};
 use std::path::Path;
-use tracing::{info, warn};
+use tracing::info;
 use crate::Result;
 
 /// A Nostr identity used by the agent.
@@ -35,13 +35,11 @@ impl Identity {
     pub async fn save_to_file(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         let secret = self.keys.secret_key();
-        let mut contents = secret.as_secret_bytes().to_vec();
-        
-        tokio::fs::write(path, hex::encode(&contents)).await?;
-        if let Err(e) = set_perms(path).await {
-            warn!("could not set restrictive permissions on identity file: {e}");
-        }
-        contents.fill(0); // zeroise in-memory copy
+        let mut raw = secret.as_secret_bytes().to_vec();
+        let mut encoded = hex::encode(&raw).into_bytes();
+        raw.fill(0);
+        write_secret_file(path, &encoded).await?;
+        encoded.fill(0);
         info!("identity saved to {}", path.display());
         Ok(())
     }
@@ -67,14 +65,23 @@ impl Identity {
     }
 }
 
+/// Write `data` to `path` creating it with 0o600 permissions atomically on Unix.
+/// On non-Unix platforms falls back to a plain write (no chmod support).
 #[cfg(unix)]
-async fn set_perms(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let perms = std::fs::Permissions::from_mode(0o600);
-    tokio::fs::set_permissions(path, perms).await
+async fn write_secret_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .await?;
+    file.write_all(data).await
 }
 
 #[cfg(not(unix))]
-async fn set_perms(_path: &Path) -> std::io::Result<()> {
-    Ok(())
+async fn write_secret_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    tokio::fs::write(path, data).await
 }

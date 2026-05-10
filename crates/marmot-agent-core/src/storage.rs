@@ -265,15 +265,30 @@ impl AgentStorage {
             crate::Error::Storage(format!("failed to generate db key: {}", e).into())
         })?;
 
-        // Write with 0o600 perms
-        tokio::fs::write(&key_path, hex::encode(key)).await?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            tokio::fs::set_permissions(&key_path, perms).await?;
-        }
+        let mut hex_key = hex::encode(key).into_bytes();
+        write_secret_file(&key_path, &hex_key).await?;
+        hex_key.fill(0);
 
         Ok(key)
     }
+}
+
+/// Write `data` to `path` creating it with 0o600 permissions atomically on Unix.
+#[cfg(unix)]
+async fn write_secret_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .await?;
+    file.write_all(data).await
+}
+
+#[cfg(not(unix))]
+async fn write_secret_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    tokio::fs::write(path, data).await
 }
