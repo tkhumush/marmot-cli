@@ -21,8 +21,10 @@
 - Chats: list (unified view with last-message preview)
 - Relay: list (shows default + inbox + NIP-65 lists), add/remove (updates kind 10050 inbox list)
 - Receive: fetches kind 445/10449/4459 + kind 1059 gift-wraps; decrypts and stores all
-- Relay: list default relays
-- Daemon: TCP JSON-RPC skeleton (`ping` live; other methods are stubs)
+- Relay: list default relays; add/remove with `--type inbox` (kind 10050) or `--type nip65` (kind 10002)
+- Block: add, remove, list (kind 10000 mute list, public p-tags)
+- Users: search follows by name/display_name/about (batch kind 0 fetch)
+- Daemon: TCP JSON-RPC with real `ping`, `identity_npub`, `list_groups`, `send_message`, `receive` methods
 - Interop confirmed with White Noise (iOS): DM grouping (empty name), inbox relay delivery (NIP-42), inner rumor kind 9
 
 ---
@@ -60,7 +62,7 @@
 - [x] `relays add <url>` — add to inbox relay list (kind 10050) and republish
 - [x] `relays remove <url>` — remove from inbox relay list and republish
 - [x] Publish inbox relay list (kind 10050) automatically on first `keypackage publish`
-- [ ] `relays add/remove --type key_package|nip65` — support other relay list types (kind 10051, 10002)
+- [x] `relays add/remove --type nip65` — support NIP-65 relay list type (kind 10002)
 - [x] Publish key package relay list (kind 10051) on keypackage publish (alongside kind 10050, on first publish)
 
 ### Key package management
@@ -86,8 +88,9 @@
 
 ## 🟠 Medium Priority — Daemon Background Tasks
 
-Once the daemon is fully wired (Phase 6), add scheduled maintenance loops:
+Daemon is now wired with real implementations: `ping`, `identity_npub`, `list_groups`, `send_message`, `receive` all work via `Handle::current().block_on()`.
 
+Remaining background maintenance loops (not yet scheduled):
 - [ ] Key package refresh — every 10 min: publish fresh packages, clean up consumed ones
 - [ ] Subscription health check — every 15 min: verify relay subscriptions are alive, rebuild if drifted
 - [ ] Relay list repair — every 30 min: detect and republish inbox/key-package relay lists that failed to publish at login
@@ -99,7 +102,7 @@ Once the daemon is fully wired (Phase 6), add scheduled maintenance loops:
 
 ### User discovery
 - [x] `users show <npub>` — fetch and display a user's Nostr profile from relays
-- [ ] `users search <query>` — search users by name across followed accounts and relays
+- [x] `users search <query>` — search users by name/display_name/about across followed accounts (batch profile fetch)
 
 ### Follows (NIP-02)
 - [x] `follows list` — list followed accounts (kind 3)
@@ -107,9 +110,9 @@ Once the daemon is fully wired (Phase 6), add scheduled maintenance loops:
 - [x] `follows remove <npub>` — unfollow a user
 
 ### Blocking (NIP-51 mute list)
-- [ ] `block add <npub>` — add to block list (private entry in kind 10000)
-- [ ] `block remove <npub>` — unblock
-- [ ] `block list` — list blocked users
+- [x] `block add <npub>` — add to block list (public p-tag in kind 10000)
+- [x] `block remove <npub>` — unblock
+- [x] `block list` — list blocked users
 
 ---
 

@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use mdk_core::messages::MessageProcessingResult;
 use std::sync::Arc;
 use tracing::Level;
-use nostr::{Event, EventId, PublicKey};
+use nostr::{EventId, PublicKey};
 
 #[derive(Parser)]
 #[command(name = "marmot-cli")]
@@ -73,6 +73,11 @@ enum Commands {
         #[command(subcommand)]
         action: ChatsAction,
     },
+    /// Manage your block list (kind 10000 mute list).
+    Block {
+        #[command(subcommand)]
+        action: BlockAction,
+    },
     /// Fetch and decrypt incoming messages for all known groups.
     Receive {
         #[arg(short, long, help = "Max events to fetch per group", default_value = "50")]
@@ -117,15 +122,19 @@ enum IdentityAction {
 enum RelayAction {
     /// Show all configured relay categories.
     List,
-    /// Add a relay to your inbox list (kind 10050) and republish.
+    /// Add a relay to a relay list and republish.
     Add {
         #[arg(help = "Relay WebSocket URL (wss://...)")]
         url: String,
+        #[arg(long, default_value = "inbox", help = "List type: inbox (kind 10050) or nip65 (kind 10002)")]
+        relay_type: String,
     },
-    /// Remove a relay from your inbox list (kind 10050) and republish.
+    /// Remove a relay from a relay list and republish.
     Remove {
         #[arg(help = "Relay WebSocket URL to remove")]
         url: String,
+        #[arg(long, default_value = "inbox", help = "List type: inbox (kind 10050) or nip65 (kind 10002)")]
+        relay_type: String,
     },
 }
 
@@ -380,6 +389,11 @@ enum UsersAction {
         #[arg(help = "npub or hex pubkey")]
         npub: String,
     },
+    /// Search your follows list by name or display_name (case-insensitive).
+    Search {
+        #[arg(help = "Search query (case-insensitive substring)")]
+        query: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -404,6 +418,22 @@ enum ChatsAction {
     List {
         #[arg(short, long, help = "Max conversations to show", default_value = "50")]
         limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum BlockAction {
+    /// List blocked users (kind 10000 mute list, public p-tags).
+    List,
+    /// Block a user — adds them to your kind 10000 mute list.
+    Add {
+        #[arg(help = "npub or hex pubkey to block")]
+        npub: String,
+    },
+    /// Unblock a user — removes them from your kind 10000 mute list.
+    Remove {
+        #[arg(help = "npub or hex pubkey to unblock")]
+        npub: String,
     },
 }
 
@@ -592,20 +622,43 @@ async fn main() {
                     }
                 }
             }
-            RelayAction::Add { url } => {
+            RelayAction::Add { url, relay_type } => {
                 let Some(ctx) = load_default_context().await else { return; };
 
-                let our_pk = ctx.identity.keys.public_key();
-                let existing_inbox = marmot_agent_core::relay::fetch_inbox_relays(
-                    our_pk,
-                    &marmot_agent_core::relay::DEFAULT_RELAYS,
-                ).await;
+                let (kind_num, list_label) = match relay_type.as_str() {
+                    "nip65" => (10002u16, "NIP-65 relay list (kind 10002)"),
+                    _ => (10050, "inbox relay list (kind 10050)"),
+                };
 
-                let mut relays = existing_inbox;
-                if relays.contains(&url) {
-                    println!("Relay '{}' is already in your inbox list.", url);
+                // Fetch existing relays from this list
+                let existing_relays = if kind_num == 10050 {
+                    marmot_agent_core::relay::fetch_inbox_relays(
+                        ctx.identity.keys.public_key(),
+                        &marmot_agent_core::relay::DEFAULT_RELAYS,
+                    ).await
+                } else {
+                    let filter = nostr::Filter::new()
+                        .kind(nostr::Kind::RelayList)
+                        .author(ctx.identity.keys.public_key())
+                        .limit(1);
+                    marmot_agent_core::relay::fetch_raw(filter, &marmot_agent_core::relay::DEFAULT_RELAYS)
+                        .await.unwrap_or_default()
+                        .into_iter().next()
+                        .map(|ev| {
+                            ev.tags.iter()
+                                .filter(|t| t.kind() == nostr::TagKind::SingleLetter(nostr::SingleLetterTag::lowercase(nostr::Alphabet::R)))
+                                .filter_map(|t| t.content().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+
+                if existing_relays.contains(&url) {
+                    println!("Relay '{}' is already in your {}.", url, list_label);
                     return;
                 }
+
+                let mut relays = existing_relays;
                 relays.push(url.clone());
 
                 let tags: Vec<nostr::Tag> = relays.iter()
@@ -613,7 +666,7 @@ async fn main() {
                     .map(nostr::Tag::relay)
                     .collect();
 
-                let event = match nostr::EventBuilder::new(nostr::Kind::Custom(10050), "")
+                let event = match nostr::EventBuilder::new(nostr::Kind::Custom(kind_num as u16), "")
                     .tags(tags)
                     .sign_with_keys(&ctx.identity.keys)
                 {
@@ -624,25 +677,46 @@ async fn main() {
                 match marmot_agent_core::relay::publish_event(&event, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
                     Ok(results) => {
                         let ok = results.iter().filter(|(_, ok)| *ok).count();
-                        println!("Relay '{}' added to inbox list: {}/{} relays OK", url, ok, results.len());
+                        println!("Relay '{}' added to {}: {}/{} relays OK", url, list_label, ok, results.len());
                     }
                     Err(e) => eprintln!("Publish failed: {e}"),
                 }
             }
-            RelayAction::Remove { url } => {
+            RelayAction::Remove { url, relay_type } => {
                 let Some(ctx) = load_default_context().await else { return; };
 
-                let our_pk = ctx.identity.keys.public_key();
-                let existing_inbox = marmot_agent_core::relay::fetch_inbox_relays(
-                    our_pk,
-                    &marmot_agent_core::relay::DEFAULT_RELAYS,
-                ).await;
+                let (kind_num, list_label) = match relay_type.as_str() {
+                    "nip65" => (10002u16, "NIP-65 relay list (kind 10002)"),
+                    _ => (10050, "inbox relay list (kind 10050)"),
+                };
 
-                let before_len = existing_inbox.len();
-                let relays: Vec<String> = existing_inbox.into_iter().filter(|r| r != &url).collect();
+                let existing_relays = if kind_num == 10050 {
+                    marmot_agent_core::relay::fetch_inbox_relays(
+                        ctx.identity.keys.public_key(),
+                        &marmot_agent_core::relay::DEFAULT_RELAYS,
+                    ).await
+                } else {
+                    let filter = nostr::Filter::new()
+                        .kind(nostr::Kind::RelayList)
+                        .author(ctx.identity.keys.public_key())
+                        .limit(1);
+                    marmot_agent_core::relay::fetch_raw(filter, &marmot_agent_core::relay::DEFAULT_RELAYS)
+                        .await.unwrap_or_default()
+                        .into_iter().next()
+                        .map(|ev| {
+                            ev.tags.iter()
+                                .filter(|t| t.kind() == nostr::TagKind::SingleLetter(nostr::SingleLetterTag::lowercase(nostr::Alphabet::R)))
+                                .filter_map(|t| t.content().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+
+                let before_len = existing_relays.len();
+                let relays: Vec<String> = existing_relays.into_iter().filter(|r| r != &url).collect();
 
                 if relays.len() == before_len {
-                    println!("Relay '{}' was not in your inbox list.", url);
+                    println!("Relay '{}' was not in your {}.", url, list_label);
                     return;
                 }
 
@@ -651,7 +725,7 @@ async fn main() {
                     .map(nostr::Tag::relay)
                     .collect();
 
-                let event = match nostr::EventBuilder::new(nostr::Kind::Custom(10050), "")
+                let event = match nostr::EventBuilder::new(nostr::Kind::Custom(kind_num as u16), "")
                     .tags(tags)
                     .sign_with_keys(&ctx.identity.keys)
                 {
@@ -662,7 +736,7 @@ async fn main() {
                 match marmot_agent_core::relay::publish_event(&event, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
                     Ok(results) => {
                         let ok = results.iter().filter(|(_, ok)| *ok).count();
-                        println!("Relay '{}' removed from inbox list: {}/{} relays OK", url, ok, results.len());
+                        println!("Relay '{}' removed from {}: {}/{} relays OK", url, list_label, ok, results.len());
                     }
                     Err(e) => eprintln!("Publish failed: {e}"),
                 }
@@ -906,27 +980,129 @@ async fn main() {
         Commands::Daemon { listen } => {
             println!("Starting daemon on {}...", listen);
 
+            // Capture the tokio Handle before entering spawn_blocking so we can
+            // call async functions from within the blocking RPC handler threads.
+            let rt_handle = tokio::runtime::Handle::current();
+
             let handler: marmot_agent_rpc::server::HandlerFn = Arc::new(
                 move |method: String, params: serde_json::Value| {
+                    let handle = rt_handle.clone();
                     match method.as_str() {
                         "ping" => Ok(serde_json::json!({"pong": true})),
+
                         "identity_npub" => {
-                            Ok(serde_json::json!({"npub": null, "note": "not yet implemented"}))
+                            handle.block_on(async {
+                                match load_default_context().await {
+                                    Some(ctx) => Ok(serde_json::json!({"npub": ctx.npub()})),
+                                    None => Err("No default identity set".to_string()),
+                                }
+                            })
                         }
+
                         "list_groups" => {
-                            Ok(serde_json::json!({"groups": [], "note": "not yet implemented"}))
+                            handle.block_on(async {
+                                let Some(ctx) = load_default_context().await else {
+                                    return Err("No default identity".to_string());
+                                };
+                                match ctx.list_groups() {
+                                    Ok(groups) => {
+                                        let json_groups: Vec<serde_json::Value> = groups.iter().map(|g| {
+                                            serde_json::json!({
+                                                "nostr_id": hex::encode(g.nostr_group_id),
+                                                "name": g.name,
+                                            })
+                                        }).collect();
+                                        Ok(serde_json::json!({"groups": json_groups}))
+                                    }
+                                    Err(e) => Err(e.to_string()),
+                                }
+                            })
                         }
+
                         "send_message" => {
-                            let _group_id = params.get("group_id").and_then(|v| v.as_str());
-                            let _content = params.get("content").and_then(|v| v.as_str());
-                            Ok(serde_json::json!({"sent": false, "note": "not yet implemented"}))
+                            let group_id = params.get("group_id").and_then(|v| v.as_str()).map(str::to_string);
+                            let content = params.get("content").and_then(|v| v.as_str()).map(str::to_string);
+                            let publish = params.get("publish").and_then(|v| v.as_bool()).unwrap_or(false);
+
+                            let (Some(group_id), Some(content)) = (group_id, content) else {
+                                return Err("Missing required params: group_id, content".to_string());
+                            };
+
+                            handle.block_on(async move {
+                                let Some(ctx) = load_default_context().await else {
+                                    return Err("No default identity".to_string());
+                                };
+                                let g = match ctx.find_group_by_nostr_id(&group_id) {
+                                    Ok(Some(g)) => g,
+                                    Ok(None) => return Err(format!("Group '{}' not found", group_id)),
+                                    Err(e) => return Err(e.to_string()),
+                                };
+                                match ctx.create_message(&g.mls_group_id, &content, None) {
+                                    Ok(event) => {
+                                        if publish {
+                                            let relays = ctx.get_group_relays(&g.mls_group_id).ok();
+                                            publish_message_event(&event, relays).await;
+                                        }
+                                        Ok(serde_json::json!({
+                                            "sent": true,
+                                            "event_id": event.id.to_hex(),
+                                            "published": publish,
+                                        }))
+                                    }
+                                    Err(e) => Err(e.to_string()),
+                                }
+                            })
                         }
+
+                        "receive" => {
+                            handle.block_on(async {
+                                let Some(ctx) = load_default_context().await else {
+                                    return Err("No default identity".to_string());
+                                };
+                                let groups = ctx.list_groups().map_err(|e| e.to_string())?;
+                                let h_tags: Vec<String> = groups.iter()
+                                    .map(|g| hex::encode(g.nostr_group_id))
+                                    .collect();
+
+                                let mut new_messages = 0usize;
+                                let mut new_welcomes = 0usize;
+
+                                if !h_tags.is_empty() {
+                                    if let Ok(evs) = marmot_agent_core::relay::fetch_group_events(
+                                        &h_tags, 50, &marmot_agent_core::relay::DEFAULT_RELAYS,
+                                    ).await {
+                                        for ev in &evs {
+                                            if let Ok(mdk_core::messages::MessageProcessingResult::ApplicationMessage(_)) = ctx.process_incoming_event(ev) {
+                                                new_messages += 1;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                let our_pk = ctx.identity.keys.public_key();
+                                if let Ok(evs) = marmot_agent_core::relay::fetch_gift_wrap_events(
+                                    our_pk, &marmot_agent_core::relay::DEFAULT_RELAYS,
+                                ).await {
+                                    for ev in &evs {
+                                        if let Ok(Some(_)) = ctx.unwrap_and_process_welcome(ev).await {
+                                            new_welcomes += 1;
+                                        }
+                                    }
+                                }
+
+                                Ok(serde_json::json!({
+                                    "new_messages": new_messages,
+                                    "new_welcomes": new_welcomes,
+                                }))
+                            })
+                        }
+
                         _ => Err(format!("Unknown method: {}", method)),
                     }
                 }
             );
 
-            println!("JSON-RPC methods available: ping, identity_npub, list_groups, send_message");
+            println!("JSON-RPC methods: ping, identity_npub, list_groups, send_message, receive");
             println!("Press Ctrl+C to stop.");
 
             match tokio::task::spawn_blocking(move || {
@@ -2013,6 +2189,70 @@ async fn main() {
                     Err(e) => eprintln!("Failed to fetch profile: {e}"),
                 }
             }
+            UsersAction::Search { query } => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                // Fetch our follows list
+                let filter = nostr::Filter::new()
+                    .kind(nostr::Kind::ContactList)
+                    .author(ctx.identity.keys.public_key())
+                    .limit(1);
+                let follows: Vec<PublicKey> = marmot_agent_core::relay::fetch_raw(filter, &marmot_agent_core::relay::DEFAULT_RELAYS)
+                    .await.unwrap_or_default()
+                    .into_iter().next()
+                    .map(|ev| {
+                        ev.tags.iter()
+                            .filter(|t| t.kind() == nostr::TagKind::p())
+                            .filter_map(|t| t.content().and_then(|s| PublicKey::parse(s).ok()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                if follows.is_empty() {
+                    println!("Your follow list is empty.");
+                    return;
+                }
+
+                println!("Searching {} follow(s) for '{}'...", follows.len(), query);
+                let q = query.to_lowercase();
+
+                // Batch-fetch all profiles in one filter
+                let profile_filter = nostr::Filter::new()
+                    .kind(nostr::Kind::Metadata)
+                    .authors(follows.clone());
+                let profiles = marmot_agent_core::relay::fetch_raw(
+                    profile_filter, &marmot_agent_core::relay::DEFAULT_RELAYS,
+                ).await.unwrap_or_default();
+
+                let mut hits = 0usize;
+                for ev in &profiles {
+                    let meta = match serde_json::from_str::<serde_json::Value>(&ev.content) {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    };
+                    let name = meta.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let display_name = meta.get("display_name").and_then(|v| v.as_str()).unwrap_or("");
+                    let about = meta.get("about").and_then(|v| v.as_str()).unwrap_or("");
+                    if name.to_lowercase().contains(&q)
+                        || display_name.to_lowercase().contains(&q)
+                        || about.to_lowercase().contains(&q)
+                    {
+                        let npub = marmot_agent_core::context::AgentContext::member_npub(&ev.pubkey);
+                        let label = if !display_name.is_empty() { display_name }
+                            else if !name.is_empty() { name }
+                            else { &npub[..std::cmp::min(20, npub.len())] };
+                        println!("  {} ({})", label, npub);
+                        if !about.is_empty() {
+                            let preview: String = about.chars().take(80).collect();
+                            println!("    about: {}", preview);
+                        }
+                        hits += 1;
+                    }
+                }
+                if hits == 0 {
+                    println!("No follows matched '{}'.", query);
+                }
+            }
         },
         Commands::Follows { action } => match action {
             FollowsAction::List => {
@@ -2225,6 +2465,137 @@ async fn main() {
                     } else {
                         println!("  '{}' ({}) — no messages", p.display_name, p.nostr_id);
                     }
+                }
+            }
+        },
+        Commands::Block { action } => match action {
+            BlockAction::List => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                let filter = nostr::Filter::new()
+                    .kind(nostr::Kind::Custom(10000))
+                    .author(ctx.identity.keys.public_key())
+                    .limit(1);
+                println!("Fetching block list from relays...");
+                match marmot_agent_core::relay::fetch_raw(filter, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
+                    Ok(events) => {
+                        if let Some(ev) = events.into_iter().next() {
+                            let blocked: Vec<PublicKey> = ev.tags.iter()
+                                .filter(|t| t.kind() == nostr::TagKind::p())
+                                .filter_map(|t| t.content().and_then(|s| PublicKey::parse(s).ok()))
+                                .collect();
+                            if blocked.is_empty() {
+                                println!("Block list is empty.");
+                            } else {
+                                println!("Blocked ({}):", blocked.len());
+                                for pk in blocked {
+                                    println!("  {}", marmot_agent_core::context::AgentContext::member_npub(&pk));
+                                }
+                            }
+                        } else {
+                            println!("No block list published yet.");
+                        }
+                    }
+                    Err(e) => eprintln!("Failed to fetch block list: {e}"),
+                }
+            }
+            BlockAction::Add { npub } => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                let target_pk = match PublicKey::parse(&npub) {
+                    Ok(pk) => pk,
+                    Err(e) => { eprintln!("Invalid npub '{}': {e}", npub); return; }
+                };
+
+                let filter = nostr::Filter::new()
+                    .kind(nostr::Kind::Custom(10000))
+                    .author(ctx.identity.keys.public_key())
+                    .limit(1);
+                let existing_tags = marmot_agent_core::relay::fetch_raw(filter, &marmot_agent_core::relay::DEFAULT_RELAYS)
+                    .await.unwrap_or_default()
+                    .into_iter().next()
+                    .map(|ev| ev.tags.into_iter().collect::<Vec<_>>())
+                    .unwrap_or_default();
+
+                let already_blocked = existing_tags.iter()
+                    .filter(|t| t.kind() == nostr::TagKind::p())
+                    .filter_map(|t| t.content().and_then(|s| PublicKey::parse(s).ok()))
+                    .any(|pk| pk == target_pk);
+
+                if already_blocked {
+                    println!("Already blocking {}.", npub);
+                    return;
+                }
+
+                let mut tags = existing_tags;
+                tags.push(nostr::Tag::public_key(target_pk));
+
+                let event = match nostr::EventBuilder::new(nostr::Kind::Custom(10000), "")
+                    .tags(tags)
+                    .sign_with_keys(&ctx.identity.keys)
+                {
+                    Ok(e) => e,
+                    Err(e) => { eprintln!("Failed to build block list: {e}"); return; }
+                };
+
+                match marmot_agent_core::relay::publish_event(&event, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
+                    Ok(results) => {
+                        let ok = results.iter().filter(|(_, ok)| *ok).count();
+                        println!("Blocked {}. Published: {}/{} relays OK", npub, ok, results.len());
+                    }
+                    Err(e) => eprintln!("Publish failed: {e}"),
+                }
+            }
+            BlockAction::Remove { npub } => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                let target_pk = match PublicKey::parse(&npub) {
+                    Ok(pk) => pk,
+                    Err(e) => { eprintln!("Invalid npub '{}': {e}", npub); return; }
+                };
+
+                let filter = nostr::Filter::new()
+                    .kind(nostr::Kind::Custom(10000))
+                    .author(ctx.identity.keys.public_key())
+                    .limit(1);
+                let existing_tags = marmot_agent_core::relay::fetch_raw(filter, &marmot_agent_core::relay::DEFAULT_RELAYS)
+                    .await.unwrap_or_default()
+                    .into_iter().next()
+                    .map(|ev| ev.tags.into_iter().collect::<Vec<_>>())
+                    .unwrap_or_default();
+
+                let before_len = existing_tags.len();
+                let tags: Vec<nostr::Tag> = existing_tags.into_iter()
+                    .filter(|t| {
+                        if t.kind() == nostr::TagKind::p() {
+                            t.content().and_then(|s| PublicKey::parse(s).ok())
+                                .map(|pk| pk != target_pk)
+                                .unwrap_or(true)
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
+
+                if tags.len() == before_len {
+                    println!("Not currently blocking {}.", npub);
+                    return;
+                }
+
+                let event = match nostr::EventBuilder::new(nostr::Kind::Custom(10000), "")
+                    .tags(tags)
+                    .sign_with_keys(&ctx.identity.keys)
+                {
+                    Ok(e) => e,
+                    Err(e) => { eprintln!("Failed to build block list: {e}"); return; }
+                };
+
+                match marmot_agent_core::relay::publish_event(&event, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
+                    Ok(results) => {
+                        let ok = results.iter().filter(|(_, ok)| *ok).count();
+                        println!("Unblocked {}. Published: {}/{} relays OK", npub, ok, results.len());
+                    }
+                    Err(e) => eprintln!("Publish failed: {e}"),
                 }
             }
         },
