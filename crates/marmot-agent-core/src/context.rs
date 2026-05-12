@@ -402,6 +402,26 @@ impl AgentContext {
             .map_err(|e| crate::Error::Group(format!("failed to get members: {}", e)))
     }
 
+    /// Add multiple members to an existing group in one MLS commit.
+    /// Returns the UpdateGroupResult with one welcome rumor per new member (same order).
+    pub fn invite_members_to_group(
+        &self,
+        mls_group_id: &GroupId,
+        member_keypackage_events: &[Event],
+    ) -> Result<UpdateGroupResult> {
+        self.mdk
+            .add_members(mls_group_id, member_keypackage_events)
+            .map_err(|e| {
+                if e.to_string().contains("InviteeMissingRequiredProposal") {
+                    crate::Error::Group(
+                        "A member's KeyPackage is missing required MLS proposals".to_string(),
+                    )
+                } else {
+                    crate::Error::Group(format!("add members failed: {}", e))
+                }
+            })
+    }
+
     /// Add a member to an existing group (invite flow — admin side).
     /// Returns the UpdateGroupResult with events to publish.
     pub fn invite_member_to_group(

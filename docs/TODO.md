@@ -11,9 +11,11 @@
 - Identity: create, list, show, delete, set-default
 - KeyPackage: publish (kind 30443), show
 - DM: create (deduplicates — reuses existing group if recipient already has one), list (shows peer npub), send (with `--reply-to`), messages
-- Groups: create (with `--description`), invite, list, members, messages, pending, join (bulk-accept)
+- Groups: create (with `--description`, `--members` for batch invite), invite, list, members, messages, pending, join (bulk-accept)
 - Groups: show, send (with `--reply-to`), leave, decline, accept, rename, remove-members, promote, demote, self-demote
-- Messages: react (kind 7), delete (kind 5)
+- Messages: react (kind 7), delete (kind 5), search (per-group and cross-group)
+- KeyPackage: check (verify reachability), list (all on relays), delete, delete-all
+- Profile: show (fetch kind 0), update (publish kind 0)
 - Receive: fetches kind 445/10449/4459 + kind 1059 gift-wraps; decrypts and stores all
 - Relay: list default relays
 - Daemon: TCP JSON-RPC skeleton (`ping` live; other methods are stubs)
@@ -43,7 +45,7 @@
 
 ### Groups create — missing options
 - [x] `--description <text>` flag for `groups create`
-- [ ] `--members <npubs...>` flag for `groups create` — create group with initial members in one step (fetch their KeyPackages, add all, send welcome to each)
+- [x] `--members <npubs...>` flag for `groups create` — create group with initial members in one step (fetch their KeyPackages, add all, send welcome to each)
 
 ---
 
@@ -57,23 +59,23 @@
 - [ ] Publish key package relay list (kind 10051) on keypackage publish — currently not published
 
 ### Key package management
-- [ ] `keypackage list` — list all our key packages currently on relays (by event ID + timestamp)
-- [ ] `keypackage delete <event_id>` — delete a specific key package event from relays
-- [ ] `keypackage delete-all --confirm` — delete all our key packages from relays
-- [ ] `keypackage check <npub>` — check if a given user has a valid key package on relays
+- [x] `keypackage list` — list all our key packages currently on relays (by event ID + timestamp)
+- [x] `keypackage delete <event_id>` — delete a specific key package event from relays
+- [x] `keypackage delete-all --confirm` — delete all our key packages from relays
+- [x] `keypackage check <npub>` — check if a given user has a valid key package on relays
 - [ ] Background key package maintenance (daemon task): publish fresh packages, remove consumed/expired (>30 days old)
 
 ### Profile
-- [ ] `profile show` — fetch and display our own Nostr metadata (kind 0)
-- [ ] `profile update [--name] [--display-name] [--about] [--picture <url>] [--nip05] [--lud16]` — update and publish kind 0 profile metadata
+- [x] `profile show` — fetch and display our own Nostr metadata (kind 0)
+- [x] `profile update [--name] [--display-name] [--about] [--picture <url>] [--nip05] [--lud16]` — update and publish kind 0 profile metadata
 
 ---
 
 ## 🟡 Medium Priority — Message History & Search
 
 - [ ] Cursor-based pagination for messages: `--before <timestamp>`, `--after <timestamp>`, `--before-id <event_id>` flags on `dm messages` / `groups messages`
-- [ ] `messages search <group_id> <query>` — substring search within a group's stored messages
-- [ ] `messages search-all <query>` — search across all groups
+- [x] `messages search <group_id> <query>` — substring search within a group's stored messages
+- [x] `messages search-all <query>` — search across all groups
 
 ---
 
