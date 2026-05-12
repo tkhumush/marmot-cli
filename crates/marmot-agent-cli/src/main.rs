@@ -203,6 +203,10 @@ enum GroupAction {
         group: String,
         #[arg(short, long, help = "Number of messages to show", default_value = "20")]
         limit: usize,
+        #[arg(long, help = "Only show messages before this Unix timestamp")]
+        before: Option<u64>,
+        #[arg(long, help = "Only show messages after this Unix timestamp")]
+        after: Option<u64>,
     },
     /// List pending group invitations (welcome messages not yet accepted).
     Pending,
@@ -301,6 +305,10 @@ enum DmAction {
         group: String,
         #[arg(short, long, help = "Number of messages to show", default_value = "20")]
         limit: usize,
+        #[arg(long, help = "Only show messages before this Unix timestamp")]
+        before: Option<u64>,
+        #[arg(long, help = "Only show messages after this Unix timestamp")]
+        after: Option<u64>,
     },
 }
 
@@ -714,12 +722,13 @@ async fn main() {
                 ).await;
                 if existing_inbox.is_empty() {
                     println!("\nPublishing inbox relay list (kind 10050)...");
-                    let inbox_tags: Vec<nostr::Tag> = marmot_agent_core::relay::DEFAULT_RELAYS.iter()
+                    let relay_tags: Vec<nostr::Tag> = marmot_agent_core::relay::DEFAULT_RELAYS.iter()
                         .filter_map(|u| nostr::RelayUrl::parse(u).ok())
                         .map(nostr::Tag::relay)
                         .collect();
+                    // kind 10050: NIP-17 inbox relays (where gift-wraps are sent to you)
                     if let Ok(inbox_event) = nostr::EventBuilder::new(nostr::Kind::Custom(10050), "")
-                        .tags(inbox_tags)
+                        .tags(relay_tags.clone())
                         .sign_with_keys(&ctx.identity.keys)
                     {
                         match marmot_agent_core::relay::publish_event(
@@ -728,9 +737,25 @@ async fn main() {
                         ).await {
                             Ok(r) => {
                                 let ok = r.iter().filter(|(_, ok)| *ok).count();
-                                println!("  Inbox relay list published: {}/{} relays OK", ok, r.len());
+                                println!("  Inbox relay list (10050) published: {}/{} relays OK", ok, r.len());
                             }
                             Err(e) => eprintln!("  Inbox relay list publish failed: {e}"),
+                        }
+                    }
+                    // kind 10051: Marmot key package relay list (where to fetch KeyPackages)
+                    if let Ok(kp_relay_event) = nostr::EventBuilder::new(nostr::Kind::Custom(10051), "")
+                        .tags(relay_tags)
+                        .sign_with_keys(&ctx.identity.keys)
+                    {
+                        match marmot_agent_core::relay::publish_event(
+                            &kp_relay_event,
+                            &marmot_agent_core::relay::DEFAULT_RELAYS,
+                        ).await {
+                            Ok(r) => {
+                                let ok = r.iter().filter(|(_, ok)| *ok).count();
+                                println!("  Key package relay list (10051) published: {}/{} relays OK", ok, r.len());
+                            }
+                            Err(e) => eprintln!("  Key package relay list publish failed: {e}"),
                         }
                     }
                 }
@@ -1200,7 +1225,7 @@ async fn main() {
                     Err(e) => eprintln!("Failed to get members: {e}"),
                 }
             }
-            GroupAction::Messages { group, limit } => {
+            GroupAction::Messages { group, limit, before, after } => {
                 let Some(ctx) = load_default_context().await else { return; };
 
                 let target_group = match ctx.find_group_by_nostr_id(&group) {
@@ -1212,8 +1237,15 @@ async fn main() {
                     Err(e) => { eprintln!("error: {e}"); return; }
                 };
 
-                match ctx.get_messages_for_group(&target_group.mls_group_id, limit) {
-                    Ok(messages) => {
+                match ctx.get_messages_for_group(&target_group.mls_group_id, if before.is_some() || after.is_some() { 10_000 } else { limit }) {
+                    Ok(mut messages) => {
+                        if let Some(ts) = before {
+                            messages.retain(|m| m.created_at.as_secs() < ts);
+                        }
+                        if let Some(ts) = after {
+                            messages.retain(|m| m.created_at.as_secs() > ts);
+                        }
+                        let messages: Vec<_> = messages.into_iter().take(limit).collect();
                         if messages.is_empty() {
                             println!("No messages in '{}'. Run 'receive' to fetch from relays.", target_group.name);
                         } else {
@@ -1690,7 +1722,7 @@ async fn main() {
                     Err(e) => eprintln!("Failed to find group: {}", e),
                 }
             }
-            DmAction::Messages { group, limit } => {
+            DmAction::Messages { group, limit, before, after } => {
                 let Some(ctx) = load_default_context().await else { return; };
 
                 let target_group = match ctx.find_group_by_nostr_id(&group) {
@@ -1702,8 +1734,15 @@ async fn main() {
                     Err(e) => { eprintln!("error: {e}"); return; }
                 };
 
-                match ctx.get_messages_for_group(&target_group.mls_group_id, limit) {
-                    Ok(messages) => {
+                match ctx.get_messages_for_group(&target_group.mls_group_id, if before.is_some() || after.is_some() { 10_000 } else { limit }) {
+                    Ok(mut messages) => {
+                        if let Some(ts) = before {
+                            messages.retain(|m| m.created_at.as_secs() < ts);
+                        }
+                        if let Some(ts) = after {
+                            messages.retain(|m| m.created_at.as_secs() > ts);
+                        }
+                        let messages: Vec<_> = messages.into_iter().take(limit).collect();
                         let display_name = if target_group.name.is_empty() { "<Direct Message>" } else { &target_group.name };
                         if messages.is_empty() {
                             println!("No messages in '{}'. Run 'receive' to fetch from relays.", display_name);

@@ -61,7 +61,7 @@
 - [x] `relays remove <url>` — remove from inbox relay list and republish
 - [x] Publish inbox relay list (kind 10050) automatically on first `keypackage publish`
 - [ ] `relays add/remove --type key_package|nip65` — support other relay list types (kind 10051, 10002)
-- [ ] Publish key package relay list (kind 10051) on keypackage publish — currently not published
+- [x] Publish key package relay list (kind 10051) on keypackage publish (alongside kind 10050, on first publish)
 
 ### Key package management
 - [x] `keypackage list` — list all our key packages currently on relays (by event ID + timestamp)
@@ -78,7 +78,7 @@
 
 ## 🟡 Medium Priority — Message History & Search
 
-- [ ] Cursor-based pagination for messages: `--before <timestamp>`, `--after <timestamp>`, `--before-id <event_id>` flags on `dm messages` / `groups messages`
+- [x] Cursor-based pagination for messages: `--before <timestamp>`, `--after <timestamp>` flags on `dm messages` / `groups messages` (in-memory filter over stored messages)
 - [x] `messages search <group_id> <query>` — substring search within a group's stored messages
 - [x] `messages search-all <query>` — search across all groups
 
