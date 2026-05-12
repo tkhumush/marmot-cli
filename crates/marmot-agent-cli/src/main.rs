@@ -37,6 +37,9 @@ enum Commands {
     Daemon {
         #[arg(short, long, default_value = "127.0.0.1:9222")]
         listen: String,
+        /// Seconds between automatic relay polls (0 = disabled).
+        #[arg(long, default_value = "30")]
+        poll_interval: u64,
     },
     /// Group management.
     Groups {
@@ -977,12 +980,97 @@ async fn main() {
                 println!("\nDone. Run 'keypackage publish' to republish a fresh one.");
             }
         },
-        Commands::Daemon { listen } => {
+        Commands::Daemon { listen, poll_interval } => {
             println!("Starting daemon on {}...", listen);
 
             // Capture the tokio Handle before entering spawn_blocking so we can
             // call async functions from within the blocking RPC handler threads.
             let rt_handle = tokio::runtime::Handle::current();
+
+            // Background receive loop: polls relays on a fixed interval so the
+            // daemon always has fresh messages without requiring manual `receive`.
+            if poll_interval > 0 {
+                let bg_handle = rt_handle.clone();
+                std::thread::spawn(move || {
+                    println!("Background receive loop active (every {}s).", poll_interval);
+                    loop {
+                        bg_handle.block_on(async {
+                            let Some(ctx) = load_default_context().await else {
+                                tracing::warn!("bg-receive: no default identity, skipping poll");
+                                return;
+                            };
+
+                            let mut new_messages = 0usize;
+                            let mut new_welcomes = 0usize;
+
+                            // Fetch and process MLS group messages (kind 445 / 10449 / 4459)
+                            let groups = match ctx.list_groups() {
+                                Ok(g) => g,
+                                Err(e) => { tracing::warn!("bg-receive: list_groups failed: {e}"); return; }
+                            };
+                            let h_tags: Vec<String> = groups.iter()
+                                .map(|g| hex::encode(g.nostr_group_id))
+                                .collect();
+                            if !h_tags.is_empty() {
+                                match marmot_agent_core::relay::fetch_group_events(
+                                    &h_tags, 100, &marmot_agent_core::relay::DEFAULT_RELAYS,
+                                ).await {
+                                    Ok(evs) => {
+                                        for ev in &evs {
+                                            match ctx.process_incoming_event(ev) {
+                                                Ok(mdk_core::messages::MessageProcessingResult::ApplicationMessage(_)) => {
+                                                    new_messages += 1;
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                    Err(e) => tracing::warn!("bg-receive: fetch_group_events failed: {e}"),
+                                }
+                            }
+
+                            // Fetch and process gift wraps / welcome messages (kind 1059)
+                            let our_pk = ctx.identity.keys.public_key();
+                            let inbox = marmot_agent_core::relay::fetch_inbox_relays(
+                                our_pk,
+                                &marmot_agent_core::relay::DEFAULT_RELAYS,
+                            ).await;
+                            let mut fetch_relays: Vec<String> = marmot_agent_core::relay::DEFAULT_RELAYS
+                                .iter().map(|s| s.to_string()).collect();
+                            for r in inbox {
+                                if !fetch_relays.contains(&r) { fetch_relays.push(r); }
+                            }
+                            let fetch_relay_refs: Vec<&str> = fetch_relays.iter().map(|s| s.as_str()).collect();
+                            match marmot_agent_core::relay::fetch_gift_wrap_events(
+                                our_pk, &fetch_relay_refs,
+                            ).await {
+                                Ok(evs) => {
+                                    for ev in &evs {
+                                        match ctx.unwrap_and_process_welcome(ev).await {
+                                            Ok(Some(_)) => new_welcomes += 1,
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                Err(e) => tracing::warn!("bg-receive: fetch_gift_wrap_events failed: {e}"),
+                            }
+
+                            if new_messages > 0 || new_welcomes > 0 {
+                                tracing::info!(
+                                    "bg-receive: {} new message(s), {} new invitation(s)",
+                                    new_messages, new_welcomes
+                                );
+                            } else {
+                                tracing::debug!("bg-receive: no new events");
+                            }
+                        });
+
+                        std::thread::sleep(std::time::Duration::from_secs(poll_interval));
+                    }
+                });
+            } else {
+                println!("Background polling disabled (--poll-interval 0).");
+            }
 
             let handler: marmot_agent_rpc::server::HandlerFn = Arc::new(
                 move |method: String, params: serde_json::Value| {
