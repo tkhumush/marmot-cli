@@ -3,7 +3,7 @@ use mdk_core::key_packages::KeyPackageEventData;
 use mdk_sqlite_storage::MdkSqliteStorage;
 use mdk_sqlite_storage::EncryptionConfig;
 use mdk_storage_traits::groups::Pagination;
-use nostr::{Event, EventBuilder, Kind, PublicKey, RelayUrl, ToBech32, UnsignedEvent};
+use nostr::{Event, EventBuilder, EventId, Kind, PublicKey, RelayUrl, ToBech32, UnsignedEvent};
 use nostr::nips::nip59;
 use std::collections::BTreeSet;
 
@@ -96,15 +96,16 @@ impl AgentContext {
     pub fn create_group(
         &self,
         name: &str,
+        description: &str,
         relays: Vec<RelayUrl>,
     ) -> Result<GroupResult> {
         let config = NostrGroupConfigData::new(
             name.to_string(),
-            "".to_string(),               // description
+            description.to_string(),
             None, None, None,             // image
             relays,
             vec![self.identity.keys.public_key()], // admins
-            None,                         // disappearing messages
+            None,                         // disappearing_messages
         );
         let result = self
             .mdk
@@ -136,7 +137,7 @@ impl AgentContext {
         member_keypackage_event: &Event,
     ) -> Result<UpdateGroupResult> {
         // 1. Create the group
-        let group_result = self.create_group(name, relays)?;
+        let group_result = self.create_group(name, "", relays)?;
         let mls_group_id = group_result.group.mls_group_id.clone();
 
         // 2. Parse their KeyPackage (just to verify it's valid before add_members)
@@ -201,21 +202,153 @@ impl AgentContext {
         Ok(groups.into_iter().find(|g| g.nostr_group_id == target))
     }
 
-    /// Build an encrypted Direct Message (MLS application message) as a kind 445 Nostr event.
-    pub fn create_dm_message(
+    /// Build an encrypted MLS application message (kind 445). Works for DMs and groups.
+    /// Pass `reply_to` to thread replies; the event ID appears as an `e` tag on the inner rumor.
+    pub fn create_message(
         &self,
         mls_group_id: &GroupId,
         content: &str,
+        reply_to: Option<EventId>,
     ) -> Result<Event> {
-        let rumor: UnsignedEvent = EventBuilder::new(Kind::ChatMessage, content)
-            .build(self.identity.keys.public_key());
-
-        let event = self
-            .mdk
+        let mut builder = EventBuilder::new(Kind::ChatMessage, content);
+        if let Some(id) = reply_to {
+            builder = builder.tag(nostr::Tag::event(id));
+        }
+        let rumor: UnsignedEvent = builder.build(self.identity.keys.public_key());
+        self.mdk
             .create_message(mls_group_id, rumor, None)
-            .map_err(|e| crate::Error::Group(format!("message creation failed: {}", e)))?;
+            .map_err(|e| crate::Error::Group(format!("message creation failed: {}", e)))
+    }
 
-        Ok(event)
+    /// Backward-compatible alias for create_message with no reply threading.
+    pub fn create_dm_message(&self, mls_group_id: &GroupId, content: &str) -> Result<Event> {
+        self.create_message(mls_group_id, content, None)
+    }
+
+    /// Create a kind 7 emoji reaction to a message inside an MLS group.
+    pub fn create_reaction(
+        &self,
+        mls_group_id: &GroupId,
+        target_event_id: EventId,
+        emoji: &str,
+    ) -> Result<Event> {
+        let rumor = EventBuilder::new(Kind::Reaction, emoji)
+            .tag(nostr::Tag::event(target_event_id))
+            .build(self.identity.keys.public_key());
+        self.mdk
+            .create_message(mls_group_id, rumor, None)
+            .map_err(|e| crate::Error::Group(format!("reaction creation failed: {}", e)))
+    }
+
+    /// Create a kind 5 deletion request for a message inside an MLS group.
+    pub fn create_deletion(
+        &self,
+        mls_group_id: &GroupId,
+        target_event_id: EventId,
+    ) -> Result<Event> {
+        let rumor = EventBuilder::new(Kind::EventDeletion, "")
+            .tag(nostr::Tag::event(target_event_id))
+            .build(self.identity.keys.public_key());
+        self.mdk
+            .create_message(mls_group_id, rumor, None)
+            .map_err(|e| crate::Error::Group(format!("deletion creation failed: {}", e)))
+    }
+
+    /// Remove members from a group (admin only).
+    pub fn remove_group_members(
+        &self,
+        mls_group_id: &GroupId,
+        pubkeys: &[PublicKey],
+    ) -> Result<UpdateGroupResult> {
+        self.mdk
+            .remove_members(mls_group_id, pubkeys)
+            .map_err(|e| crate::Error::Group(format!("remove members failed: {}", e)))
+    }
+
+    /// Rename a group (admin only). Publishes a GroupContextExtensions commit.
+    pub fn rename_group(&self, mls_group_id: &GroupId, name: &str) -> Result<UpdateGroupResult> {
+        self.mdk
+            .update_group_data(mls_group_id, NostrGroupDataUpdate::new().name(name))
+            .map_err(|e| crate::Error::Group(format!("rename failed: {}", e)))
+    }
+
+    /// Promote a member to admin (admin only).
+    pub fn promote_member(
+        &self,
+        mls_group_id: &GroupId,
+        new_admin: PublicKey,
+    ) -> Result<UpdateGroupResult> {
+        let group = self.mdk
+            .get_group(mls_group_id)
+            .map_err(|e| crate::Error::Group(e.to_string()))?
+            .ok_or_else(|| crate::Error::Group("group not found".to_string()))?;
+        let mut admins: Vec<PublicKey> = group.admin_pubkeys.into_iter().collect();
+        if !admins.contains(&new_admin) {
+            admins.push(new_admin);
+        }
+        self.mdk
+            .update_group_data(mls_group_id, NostrGroupDataUpdate::new().admins(admins))
+            .map_err(|e| crate::Error::Group(format!("promote failed: {}", e)))
+    }
+
+    /// Demote an admin to member (admin only). Fails if they are the last admin.
+    pub fn demote_member(
+        &self,
+        mls_group_id: &GroupId,
+        admin: &PublicKey,
+    ) -> Result<UpdateGroupResult> {
+        let group = self.mdk
+            .get_group(mls_group_id)
+            .map_err(|e| crate::Error::Group(e.to_string()))?
+            .ok_or_else(|| crate::Error::Group("group not found".to_string()))?;
+        let admins: Vec<PublicKey> = group.admin_pubkeys.into_iter()
+            .filter(|pk| pk != admin)
+            .collect();
+        if admins.is_empty() {
+            return Err(crate::Error::Group("cannot remove the last admin".to_string()));
+        }
+        self.mdk
+            .update_group_data(mls_group_id, NostrGroupDataUpdate::new().admins(admins))
+            .map_err(|e| crate::Error::Group(format!("demote failed: {}", e)))
+    }
+
+    /// Remove self from the admin list. Required before leaving if you are an admin.
+    pub fn self_demote(&self, mls_group_id: &GroupId) -> Result<UpdateGroupResult> {
+        self.mdk
+            .self_demote(mls_group_id)
+            .map_err(|e| crate::Error::Group(format!("self-demote failed: {}", e)))
+    }
+
+    /// Publish a leave proposal (SelfRemove or Remove) for this group.
+    /// Must not be an admin — call self_demote() first if needed.
+    pub fn leave_group(&self, mls_group_id: &GroupId) -> Result<UpdateGroupResult> {
+        self.mdk
+            .leave_group(mls_group_id)
+            .map_err(|e| crate::Error::Group(format!("leave group failed: {}", e)))
+    }
+
+    /// Decline a specific pending welcome invitation by its nostr_group_id hex.
+    pub fn decline_welcome_by_nostr_id(&self, nostr_group_id_hex: &str) -> Result<()> {
+        let welcomes = self.list_pending_welcomes()?;
+        let welcome = welcomes.into_iter()
+            .find(|w| hex::encode(w.nostr_group_id) == nostr_group_id_hex)
+            .ok_or_else(|| crate::Error::Group(
+                format!("no pending invitation for group {}", nostr_group_id_hex)
+            ))?;
+        self.mdk
+            .decline_welcome(&welcome)
+            .map_err(|e| crate::Error::Group(format!("decline failed: {}", e)))
+    }
+
+    /// Accept a single specific pending welcome invitation by its nostr_group_id hex.
+    pub fn accept_welcome_by_nostr_id(&self, nostr_group_id_hex: &str) -> Result<()> {
+        let welcomes = self.list_pending_welcomes()?;
+        let welcome = welcomes.into_iter()
+            .find(|w| hex::encode(w.nostr_group_id) == nostr_group_id_hex)
+            .ok_or_else(|| crate::Error::Group(
+                format!("no pending invitation for group {}", nostr_group_id_hex)
+            ))?;
+        self.accept_welcome(&welcome)
     }
 
     /// Return the evolution commit event from an UpdateGroupResult, ready to publish.

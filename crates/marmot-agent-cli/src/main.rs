@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use mdk_core::messages::MessageProcessingResult;
 use std::sync::Arc;
 use tracing::Level;
-use nostr::{Event, PublicKey};
+use nostr::{Event, EventId, PublicKey};
 
 #[derive(Parser)]
 #[command(name = "marmot-cli")]
@@ -47,6 +47,11 @@ enum Commands {
     Dm {
         #[command(subcommand)]
         action: DmAction,
+    },
+    /// Message reactions and deletions within a group.
+    Messages {
+        #[command(subcommand)]
+        action: MessageAction,
     },
     /// Fetch and decrypt incoming messages for all known groups.
     Receive {
@@ -104,11 +109,29 @@ enum KeypackageAction {
 enum GroupAction {
     /// List all local groups.
     List,
+    /// Show full metadata for a group.
+    Show {
+        #[arg(short, long, help = "Group nostr ID (hex h-tag)")]
+        group: String,
+    },
     /// Create a new MLS group.
     Create {
         #[arg(short, long, help = "Group name")]
         name: String,
+        #[arg(short, long, help = "Group description", default_value = "")]
+        description: String,
         #[arg(long, help = "Also publish the group creation events to relays")]
+        publish: bool,
+    },
+    /// Send a message to a group.
+    Send {
+        #[arg(short, long, help = "Group nostr ID (hex h-tag)")]
+        group: String,
+        #[arg(short, long, help = "Message content")]
+        message: String,
+        #[arg(long, help = "Event ID of message to reply to (hex)")]
+        reply_to: Option<String>,
+        #[arg(long, help = "Publish the message to relays")]
         publish: bool,
     },
     /// Invite a member to a group by fetching their KeyPackage.
@@ -134,9 +157,69 @@ enum GroupAction {
     },
     /// List pending group invitations (welcome messages not yet accepted).
     Pending,
-    /// Accept all pending group invitations and perform a self-update key rotation.
+    /// Accept all pending group invitations.
     Join {
         #[arg(long, help = "Publish self-update commit events to relays after joining")]
+        publish: bool,
+    },
+    /// Accept a specific pending invitation by nostr group ID.
+    Accept {
+        #[arg(short, long, help = "Group nostr ID (hex h-tag) of the pending invitation")]
+        group: String,
+    },
+    /// Decline a specific pending invitation by nostr group ID.
+    Decline {
+        #[arg(short, long, help = "Group nostr ID (hex h-tag) of the pending invitation")]
+        group: String,
+    },
+    /// Rename a group (admin only).
+    Rename {
+        #[arg(short, long, help = "Group nostr ID (hex h-tag)")]
+        group: String,
+        #[arg(short, long, help = "New group name")]
+        name: String,
+        #[arg(long, help = "Publish the commit event to relays")]
+        publish: bool,
+    },
+    /// Remove one or more members from a group (admin only).
+    RemoveMembers {
+        #[arg(short, long, help = "Group nostr ID (hex h-tag)")]
+        group: String,
+        #[arg(long = "member", help = "Member npub to remove (repeat for multiple)", action = clap::ArgAction::Append)]
+        members: Vec<String>,
+        #[arg(long, help = "Publish the commit event to relays")]
+        publish: bool,
+    },
+    /// Promote a member to admin (admin only).
+    Promote {
+        #[arg(short, long, help = "Group nostr ID (hex h-tag)")]
+        group: String,
+        #[arg(short, long, help = "Member npub to promote to admin")]
+        member: String,
+        #[arg(long, help = "Publish the commit event to relays")]
+        publish: bool,
+    },
+    /// Demote an admin to member (admin only). Fails if they are the last admin.
+    Demote {
+        #[arg(short, long, help = "Group nostr ID (hex h-tag)")]
+        group: String,
+        #[arg(short, long, help = "Admin npub to demote")]
+        member: String,
+        #[arg(long, help = "Publish the commit event to relays")]
+        publish: bool,
+    },
+    /// Remove yourself from the admin list. Required before leaving if you are an admin.
+    SelfDemote {
+        #[arg(short, long, help = "Group nostr ID (hex h-tag)")]
+        group: String,
+        #[arg(long, help = "Publish the commit event to relays")]
+        publish: bool,
+    },
+    /// Leave a group. Run 'self-demote' first if you are an admin.
+    Leave {
+        #[arg(short, long, help = "Group nostr ID (hex h-tag)")]
+        group: String,
+        #[arg(long, help = "Publish the leave event to relays")]
         publish: bool,
     },
 }
@@ -158,6 +241,8 @@ enum DmAction {
         group: String,
         #[arg(short, long, help = "Message content")]
         message: String,
+        #[arg(long, help = "Event ID of message to reply to (hex)")]
+        reply_to: Option<String>,
         #[arg(long, help = "Also publish the message to group relays")]
         publish: bool,
     },
@@ -167,6 +252,30 @@ enum DmAction {
         group: String,
         #[arg(short, long, help = "Number of messages to show", default_value = "20")]
         limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum MessageAction {
+    /// Send an emoji reaction to a message inside a group.
+    React {
+        #[arg(short, long, help = "Group nostr ID (hex h-tag)")]
+        group: String,
+        #[arg(short, long, help = "Event ID of the message to react to (hex)")]
+        event_id: String,
+        #[arg(short, long, help = "Emoji to react with", default_value = "+")]
+        emoji: String,
+        #[arg(long, help = "Publish to relays")]
+        publish: bool,
+    },
+    /// Request deletion of a message inside a group (kind 5).
+    Delete {
+        #[arg(short, long, help = "Group nostr ID (hex h-tag)")]
+        group: String,
+        #[arg(short, long, help = "Event ID of the message to delete (hex)")]
+        event_id: String,
+        #[arg(long, help = "Publish to relays")]
+        publish: bool,
     },
 }
 
@@ -194,6 +303,32 @@ async fn load_default_context() -> Option<marmot_agent_core::context::AgentConte
             eprintln!("error: failed to load agent context: {e}");
             None
         }
+    }
+}
+
+/// Publish a message event to the group's relays + default relays, print relay results.
+async fn publish_message_event(
+    event: &nostr::Event,
+    group_relays: Option<Vec<String>>,
+) {
+    let mut relay_urls: Vec<String> = marmot_agent_core::relay::DEFAULT_RELAYS
+        .iter().map(|s| s.to_string()).collect();
+    if let Some(extra) = group_relays {
+        for r in extra {
+            if !relay_urls.contains(&r) { relay_urls.push(r); }
+        }
+    }
+    let relay_refs: Vec<&str> = relay_urls.iter().map(|s| s.as_str()).collect();
+    println!("  Publishing to relays...");
+    match marmot_agent_core::relay::publish_event(event, &relay_refs).await {
+        Ok(results) => {
+            let ok = results.iter().filter(|(_, ok)| *ok).count();
+            println!("  Published: {}/{} relays OK", ok, results.len());
+            for (url, ok) in results {
+                println!("    {} {}", if ok { "OK" } else { "FAIL" }, url);
+            }
+        }
+        Err(e) => eprintln!("  Publish failed: {e}"),
     }
 }
 
@@ -300,13 +435,11 @@ async fn main() {
             KeypackageAction::Publish => {
                 let Some(ctx) = load_default_context().await else { return; };
 
-                // Parse default relays
                 let relays: Vec<nostr::RelayUrl> = marmot_agent_core::relay::DEFAULT_RELAYS
                     .iter()
                     .filter_map(|url| nostr::RelayUrl::parse(url).ok())
                     .collect();
 
-                // Create KeyPackage via MDK
                 let kp_data = match ctx.create_keypackage(relays.clone()) {
                     Ok(d) => d,
                     Err(e) => {
@@ -315,7 +448,6 @@ async fn main() {
                     }
                 };
 
-                // Sign the event
                 let event = match ctx.sign_keypackage_event(&kp_data) {
                     Ok(e) => e,
                     Err(e) => {
@@ -324,7 +456,6 @@ async fn main() {
                     }
                 };
 
-                // Publish to relays
                 let results = match marmot_agent_core::relay::publish_event(
                     &event,
                     &marmot_agent_core::relay::DEFAULT_RELAYS,
@@ -377,7 +508,6 @@ async fn main() {
                     match method.as_str() {
                         "ping" => Ok(serde_json::json!({"pong": true})),
                         "identity_npub" => {
-                            // TODO: load default identity from storage
                             Ok(serde_json::json!({"npub": null, "note": "not yet implemented"}))
                         }
                         "list_groups" => {
@@ -425,7 +555,40 @@ async fn main() {
                     Err(e) => eprintln!("Failed to list groups: {}", e),
                 }
             }
-            GroupAction::Create { name, publish } => {
+            GroupAction::Show { group } => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                let target_group = match ctx.find_group_by_nostr_id(&group) {
+                    Ok(Some(g)) => g,
+                    Ok(None) => { eprintln!("Group '{}' not found.", group); return; }
+                    Err(e) => { eprintln!("error: {e}"); return; }
+                };
+
+                let members = ctx.get_members_for_group(&target_group.mls_group_id).unwrap_or_default();
+                let relays = ctx.get_group_relays(&target_group.mls_group_id).unwrap_or_default();
+
+                println!("Group '{}'", if target_group.name.is_empty() { "<Direct Message>" } else { &target_group.name });
+                println!("  nostr-id:    {}", hex::encode(target_group.nostr_group_id));
+                println!("  members:     {}", members.len());
+                for pk in &members {
+                    let npub = marmot_agent_core::context::AgentContext::member_npub(pk);
+                    let is_admin = target_group.admin_pubkeys.contains(pk);
+                    let is_us = pk == &ctx.identity.keys.public_key();
+                    let mut markers = vec![];
+                    if is_admin { markers.push("admin"); }
+                    if is_us { markers.push("you"); }
+                    if markers.is_empty() {
+                        println!("    {}", npub);
+                    } else {
+                        println!("    {} ({})", npub, markers.join(", "));
+                    }
+                }
+                println!("  relays:      {}", relays.len());
+                for r in &relays {
+                    println!("    {}", r);
+                }
+            }
+            GroupAction::Create { name, description, publish } => {
                 let Some(ctx) = load_default_context().await else { return; };
 
                 let relays: Vec<nostr::RelayUrl> = marmot_agent_core::relay::DEFAULT_RELAYS
@@ -433,7 +596,7 @@ async fn main() {
                     .filter_map(|url| nostr::RelayUrl::parse(url).ok())
                     .collect();
 
-                match ctx.create_group(&name, relays) {
+                match ctx.create_group(&name, &description, relays) {
                     Ok(result) => {
                         println!("Group '{}' created!", name);
                         println!("  Nostr group ID: {}", hex::encode(result.group.nostr_group_id));
@@ -446,6 +609,34 @@ async fn main() {
                         }
                     }
                     Err(e) => eprintln!("Group creation failed: {}", e),
+                }
+            }
+            GroupAction::Send { group, message, reply_to, publish } => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                let reply_to_id = match parse_optional_event_id(reply_to.as_deref()) {
+                    Ok(id) => id,
+                    Err(e) => { eprintln!("{e}"); return; }
+                };
+
+                let g = match ctx.find_group_by_nostr_id(&group) {
+                    Ok(Some(g)) => g,
+                    Ok(None) => { eprintln!("Group '{}' not found. Use 'groups list'.", group); return; }
+                    Err(e) => { eprintln!("error: {e}"); return; }
+                };
+
+                match ctx.create_message(&g.mls_group_id, &message, reply_to_id) {
+                    Ok(event) => {
+                        println!("Message created!");
+                        println!("  Event ID: {}", event.id);
+                        if publish {
+                            let relays = ctx.get_group_relays(&g.mls_group_id).ok();
+                            publish_message_event(&event, relays).await;
+                        } else {
+                            println!("  NOTE: Use --publish to send to relays.");
+                        }
+                    }
+                    Err(e) => eprintln!("Message creation failed: {e}"),
                 }
             }
             GroupAction::Invite { group, member, publish } => {
@@ -514,7 +705,6 @@ async fn main() {
                             println!("    member inbox relays: {:?}", inbox);
                             inbox
                         };
-                        let welcome_relays: Vec<&str> = welcome_relay_strings.iter().map(|s| s.as_str()).collect();
                         for rumor in rumors {
                             match ctx.gift_wrap_welcome(rumor, &member_pk).await {
                                 Ok(gift_wrap) => {
@@ -544,10 +734,7 @@ async fn main() {
 
                 let target_group = match ctx.find_group_by_nostr_id(&group) {
                     Ok(Some(g)) => g,
-                    Ok(None) => {
-                        eprintln!("Group '{}' not found.", group);
-                        return;
-                    }
+                    Ok(None) => { eprintln!("Group '{}' not found.", group); return; }
                     Err(e) => { eprintln!("error: {e}"); return; }
                 };
 
@@ -605,7 +792,7 @@ async fn main() {
                             for (i, w) in welcomes.iter().enumerate() {
                                 println!("  [{}] nostr group: {}", i + 1, hex::encode(w.nostr_group_id));
                             }
-                            println!("\nRun 'groups join' to accept all pending invitations.");
+                            println!("\nRun 'groups join' to accept all, or 'groups accept --group <nostr-id>' for one.");
                         }
                     }
                     Err(e) => eprintln!("Failed to list pending welcomes: {e}"),
@@ -645,7 +832,6 @@ async fn main() {
                 println!("\nAccepted {} invitation(s).", accepted);
 
                 // Rotate KeyPackage so the consumed one is replaced on relays.
-                // MLS KeyPackages are single-use; without rotation, the next DM invite will fail.
                 let relays: Vec<nostr::RelayUrl> = marmot_agent_core::relay::DEFAULT_RELAYS
                     .iter()
                     .filter_map(|url| nostr::RelayUrl::parse(url).ok())
@@ -667,14 +853,228 @@ async fn main() {
                 }
 
                 println!("\nRun 'receive' to fetch new messages.");
-                let _ = publish; // --publish flag reserved for future use
+                let _ = publish; // --publish reserved for future use
+            }
+            GroupAction::Accept { group } => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                match ctx.accept_welcome_by_nostr_id(&group) {
+                    Ok(()) => {
+                        println!("Joined group: {}", group);
+                        println!("  Run 'receive' to fetch messages.");
+                    }
+                    Err(e) => eprintln!("Failed to accept invitation: {e}"),
+                }
+            }
+            GroupAction::Decline { group } => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                match ctx.decline_welcome_by_nostr_id(&group) {
+                    Ok(()) => println!("Invitation declined: {}", group),
+                    Err(e) => eprintln!("Failed to decline invitation: {e}"),
+                }
+            }
+            GroupAction::Rename { group, name, publish } => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                let g = match ctx.find_group_by_nostr_id(&group) {
+                    Ok(Some(g)) => g,
+                    Ok(None) => { eprintln!("Group '{}' not found.", group); return; }
+                    Err(e) => { eprintln!("error: {e}"); return; }
+                };
+
+                match ctx.rename_group(&g.mls_group_id, &name) {
+                    Ok(result) => {
+                        println!("Group renamed to '{}'.", name);
+                        if publish {
+                            let ev = marmot_agent_core::context::AgentContext::evolution_event(&result);
+                            match marmot_agent_core::relay::publish_event(ev, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
+                                Ok(r) => {
+                                    let ok = r.iter().filter(|(_, ok)| *ok).count();
+                                    println!("  Published: {}/{} relays OK", ok, r.len());
+                                }
+                                Err(e) => eprintln!("  Publish failed: {e}"),
+                            }
+                        } else {
+                            println!("  NOTE: Use --publish to send the commit event to relays.");
+                        }
+                    }
+                    Err(e) => eprintln!("Rename failed: {e}"),
+                }
+            }
+            GroupAction::RemoveMembers { group, members, publish } => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                if members.is_empty() {
+                    eprintln!("No members specified. Use --member <npub> to specify members.");
+                    return;
+                }
+
+                let g = match ctx.find_group_by_nostr_id(&group) {
+                    Ok(Some(g)) => g,
+                    Ok(None) => { eprintln!("Group '{}' not found.", group); return; }
+                    Err(e) => { eprintln!("error: {e}"); return; }
+                };
+
+                let mut pubkeys = vec![];
+                for m in &members {
+                    match PublicKey::parse(m) {
+                        Ok(pk) => pubkeys.push(pk),
+                        Err(e) => { eprintln!("Invalid npub '{}': {e}", m); return; }
+                    }
+                }
+
+                match ctx.remove_group_members(&g.mls_group_id, &pubkeys) {
+                    Ok(result) => {
+                        println!("Removed {} member(s) from group.", pubkeys.len());
+                        if publish {
+                            let ev = marmot_agent_core::context::AgentContext::evolution_event(&result);
+                            match marmot_agent_core::relay::publish_event(ev, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
+                                Ok(r) => {
+                                    let ok = r.iter().filter(|(_, ok)| *ok).count();
+                                    println!("  Published: {}/{} relays OK", ok, r.len());
+                                }
+                                Err(e) => eprintln!("  Publish failed: {e}"),
+                            }
+                        } else {
+                            println!("  NOTE: Use --publish to send the commit event to relays.");
+                        }
+                    }
+                    Err(e) => eprintln!("Remove members failed: {e}"),
+                }
+            }
+            GroupAction::Promote { group, member, publish } => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                let g = match ctx.find_group_by_nostr_id(&group) {
+                    Ok(Some(g)) => g,
+                    Ok(None) => { eprintln!("Group '{}' not found.", group); return; }
+                    Err(e) => { eprintln!("error: {e}"); return; }
+                };
+
+                let member_pk = match PublicKey::parse(&member) {
+                    Ok(pk) => pk,
+                    Err(e) => { eprintln!("Invalid npub '{}': {e}", member); return; }
+                };
+
+                match ctx.promote_member(&g.mls_group_id, member_pk) {
+                    Ok(result) => {
+                        println!("Member promoted to admin.");
+                        if publish {
+                            let ev = marmot_agent_core::context::AgentContext::evolution_event(&result);
+                            match marmot_agent_core::relay::publish_event(ev, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
+                                Ok(r) => {
+                                    let ok = r.iter().filter(|(_, ok)| *ok).count();
+                                    println!("  Published: {}/{} relays OK", ok, r.len());
+                                }
+                                Err(e) => eprintln!("  Publish failed: {e}"),
+                            }
+                        } else {
+                            println!("  NOTE: Use --publish to send the commit event to relays.");
+                        }
+                    }
+                    Err(e) => eprintln!("Promote failed: {e}"),
+                }
+            }
+            GroupAction::Demote { group, member, publish } => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                let g = match ctx.find_group_by_nostr_id(&group) {
+                    Ok(Some(g)) => g,
+                    Ok(None) => { eprintln!("Group '{}' not found.", group); return; }
+                    Err(e) => { eprintln!("error: {e}"); return; }
+                };
+
+                let member_pk = match PublicKey::parse(&member) {
+                    Ok(pk) => pk,
+                    Err(e) => { eprintln!("Invalid npub '{}': {e}", member); return; }
+                };
+
+                match ctx.demote_member(&g.mls_group_id, &member_pk) {
+                    Ok(result) => {
+                        println!("Admin demoted to member.");
+                        if publish {
+                            let ev = marmot_agent_core::context::AgentContext::evolution_event(&result);
+                            match marmot_agent_core::relay::publish_event(ev, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
+                                Ok(r) => {
+                                    let ok = r.iter().filter(|(_, ok)| *ok).count();
+                                    println!("  Published: {}/{} relays OK", ok, r.len());
+                                }
+                                Err(e) => eprintln!("  Publish failed: {e}"),
+                            }
+                        } else {
+                            println!("  NOTE: Use --publish to send the commit event to relays.");
+                        }
+                    }
+                    Err(e) => eprintln!("Demote failed: {e}"),
+                }
+            }
+            GroupAction::SelfDemote { group, publish } => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                let g = match ctx.find_group_by_nostr_id(&group) {
+                    Ok(Some(g)) => g,
+                    Ok(None) => { eprintln!("Group '{}' not found.", group); return; }
+                    Err(e) => { eprintln!("error: {e}"); return; }
+                };
+
+                match ctx.self_demote(&g.mls_group_id) {
+                    Ok(result) => {
+                        println!("Removed yourself from admin list.");
+                        if publish {
+                            let ev = marmot_agent_core::context::AgentContext::evolution_event(&result);
+                            match marmot_agent_core::relay::publish_event(ev, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
+                                Ok(r) => {
+                                    let ok = r.iter().filter(|(_, ok)| *ok).count();
+                                    println!("  Published: {}/{} relays OK", ok, r.len());
+                                }
+                                Err(e) => eprintln!("  Publish failed: {e}"),
+                            }
+                        } else {
+                            println!("  NOTE: Use --publish to send the commit event to relays.");
+                        }
+                    }
+                    Err(e) => eprintln!("Self-demote failed: {e}"),
+                }
+            }
+            GroupAction::Leave { group, publish } => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                let g = match ctx.find_group_by_nostr_id(&group) {
+                    Ok(Some(g)) => g,
+                    Ok(None) => { eprintln!("Group '{}' not found.", group); return; }
+                    Err(e) => { eprintln!("error: {e}"); return; }
+                };
+
+                match ctx.leave_group(&g.mls_group_id) {
+                    Ok(result) => {
+                        println!("Left group '{}'.", g.name);
+                        if publish {
+                            let ev = marmot_agent_core::context::AgentContext::evolution_event(&result);
+                            match marmot_agent_core::relay::publish_event(ev, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
+                                Ok(r) => {
+                                    let ok = r.iter().filter(|(_, ok)| *ok).count();
+                                    println!("  Published: {}/{} relays OK", ok, r.len());
+                                }
+                                Err(e) => eprintln!("  Publish failed: {e}"),
+                            }
+                        } else {
+                            println!("  NOTE: Use --publish to send the leave event to relays.");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Leave failed: {e}");
+                        if e.to_string().contains("admin") || e.to_string().contains("demote") {
+                            eprintln!("  Hint: Run 'groups self-demote --group {}' first, then try leaving again.", group);
+                        }
+                    }
+                }
             }
         },
         Commands::Dm { action } => match action {
             DmAction::Create { recipient, publish } => {
                 let Some(ctx) = load_default_context().await else { return; };
 
-                // Parse recipient npub
                 let recipient_pk = match PublicKey::parse(&recipient) {
                     Ok(pk) => pk,
                     Err(e) => {
@@ -727,7 +1127,6 @@ async fn main() {
                 if publish {
                     println!("\n  Publishing events to relays...");
 
-                    // Publish the MLS commit event
                     let commit_ev = marmot_agent_core::context::AgentContext::evolution_event(&result);
                     match marmot_agent_core::relay::publish_events(
                         &[("evolution_commit", commit_ev)],
@@ -742,9 +1141,6 @@ async fn main() {
                         Err(e) => eprintln!("Publish commit failed: {}", e),
                     }
 
-                    // Gift-wrap each welcome rumor for the recipient (NIP-59 kind 1059).
-                    // Per MIP-02, welcome events MUST be delivered to the recipient's
-                    // inbox relays (kind 10050), not our default relays.
                     if let Some(rumors) = result.welcome_rumors {
                         let inbox = marmot_agent_core::relay::fetch_inbox_relays(
                             recipient_pk,
@@ -757,7 +1153,6 @@ async fn main() {
                             println!("    recipient inbox relays: {:?}", inbox);
                             inbox
                         };
-                        let welcome_relays: Vec<&str> = welcome_relay_strings.iter().map(|s| s.as_str()).collect();
 
                         for rumor in rumors {
                             match ctx.gift_wrap_welcome(rumor, &recipient_pk).await {
@@ -814,48 +1209,25 @@ async fn main() {
                     Err(e) => eprintln!("Failed to list conversations: {}", e),
                 }
             }
-            DmAction::Send { group, message, publish } => {
+            DmAction::Send { group, message, reply_to, publish } => {
                 let Some(ctx) = load_default_context().await else { return; };
+
+                let reply_to_id = match parse_optional_event_id(reply_to.as_deref()) {
+                    Ok(id) => id,
+                    Err(e) => { eprintln!("{e}"); return; }
+                };
 
                 match ctx.find_group_by_nostr_id(&group) {
                     Ok(Some(g)) => {
-                        match ctx.create_dm_message(&g.mls_group_id, &message) {
+                        match ctx.create_message(&g.mls_group_id, &message, reply_to_id) {
                             Ok(event) => {
                                 println!("Encrypted message created!");
                                 println!("  Event ID: {}", event.id);
                                 println!("  Kind: {}", event.kind);
 
                                 if publish {
-                                    // Publish to group-configured relays + DEFAULT_RELAYS
-                                    let mut relay_urls: Vec<String> = marmot_agent_core::relay::DEFAULT_RELAYS
-                                        .iter().map(|s| s.to_string()).collect();
-                                    if let Ok(group_relays) = ctx.get_group_relays(&g.mls_group_id) {
-                                        for r in group_relays {
-                                            if !relay_urls.contains(&r) {
-                                                relay_urls.push(r);
-                                            }
-                                        }
-                                    }
-                                    let relay_refs: Vec<&str> = relay_urls.iter().map(|s| s.as_str()).collect();
-
-                                    println!("  Publishing to relays...");
-                                    let results = match marmot_agent_core::relay::publish_event(
-                                        &event,
-                                        &relay_refs,
-                                    ).await {
-                                        Ok(r) => r,
-                                        Err(e) => {
-                                            eprintln!("Publish failed: {}", e);
-                                            return;
-                                        }
-                                    };
-
-                                    let ok_count = results.iter().filter(|(_, ok)| *ok).count();
-                                    println!("  Published: {}/{} relays OK", ok_count, results.len());
-                                    for (url, ok) in results {
-                                        let status = if ok { "OK" } else { "FAIL" };
-                                        println!("    {} {}", status, url);
-                                    }
+                                    let group_relays = ctx.get_group_relays(&g.mls_group_id).ok();
+                                    publish_message_event(&event, group_relays).await;
                                 } else {
                                     println!("\n  NOTE: Not published. Use --publish to send.");
                                 }
@@ -899,6 +1271,64 @@ async fn main() {
                 }
             }
         },
+        Commands::Messages { action } => match action {
+            MessageAction::React { group, event_id, emoji, publish } => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                let target_id = match EventId::parse(&event_id) {
+                    Ok(id) => id,
+                    Err(e) => { eprintln!("Invalid event ID '{}': {e}", event_id); return; }
+                };
+
+                let g = match ctx.find_group_by_nostr_id(&group) {
+                    Ok(Some(g)) => g,
+                    Ok(None) => { eprintln!("Group '{}' not found.", group); return; }
+                    Err(e) => { eprintln!("error: {e}"); return; }
+                };
+
+                match ctx.create_reaction(&g.mls_group_id, target_id, &emoji) {
+                    Ok(event) => {
+                        println!("Reaction '{}' created!", emoji);
+                        println!("  Event ID: {}", event.id);
+                        if publish {
+                            let group_relays = ctx.get_group_relays(&g.mls_group_id).ok();
+                            publish_message_event(&event, group_relays).await;
+                        } else {
+                            println!("  NOTE: Use --publish to send to relays.");
+                        }
+                    }
+                    Err(e) => eprintln!("Reaction creation failed: {e}"),
+                }
+            }
+            MessageAction::Delete { group, event_id, publish } => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                let target_id = match EventId::parse(&event_id) {
+                    Ok(id) => id,
+                    Err(e) => { eprintln!("Invalid event ID '{}': {e}", event_id); return; }
+                };
+
+                let g = match ctx.find_group_by_nostr_id(&group) {
+                    Ok(Some(g)) => g,
+                    Ok(None) => { eprintln!("Group '{}' not found.", group); return; }
+                    Err(e) => { eprintln!("error: {e}"); return; }
+                };
+
+                match ctx.create_deletion(&g.mls_group_id, target_id) {
+                    Ok(event) => {
+                        println!("Deletion request created.");
+                        println!("  Event ID: {}", event.id);
+                        if publish {
+                            let group_relays = ctx.get_group_relays(&g.mls_group_id).ok();
+                            publish_message_event(&event, group_relays).await;
+                        } else {
+                            println!("  NOTE: Use --publish to send to relays.");
+                        }
+                    }
+                    Err(e) => eprintln!("Deletion creation failed: {e}"),
+                }
+            }
+        },
         Commands::Receive { limit, offline } => {
             let Some(ctx) = load_default_context().await else { return; };
 
@@ -907,7 +1337,6 @@ async fn main() {
                 Err(e) => { eprintln!("Failed to list groups: {e}"); return; }
             };
 
-            // Collect h-tags (nostr group IDs) for all known groups
             let h_tags: Vec<String> = groups.iter()
                 .map(|g| hex::encode(g.nostr_group_id))
                 .collect();
@@ -960,8 +1389,6 @@ async fn main() {
                 }
             }
 
-            // Fetch gift-wrap events (kind 1059) addressed to us — these carry welcome invites.
-            // Check both our kind:10050 inbox relays AND default relays.
             let gift_wrap_events = if offline {
                 vec![]
             } else {
@@ -1032,7 +1459,6 @@ async fn main() {
             println!("  Our pubkey    : {}", our_pk.to_hex());
             println!();
 
-            // 1. Kind 445/10449/4459 events published BY the target pubkey
             println!("--- Events authored by target (kinds 445/10449/4459) ---");
             let filter = nostr::Filter::new()
                 .author(target_pk)
@@ -1056,7 +1482,6 @@ async fn main() {
             }
             println!();
 
-            // 2. Gift wraps (kind 1059) addressed to OUR pubkey
             println!("--- Gift wraps addressed to us (kind 1059) ---");
             let filter = nostr::Filter::new()
                 .kind(nostr::Kind::GiftWrap)
@@ -1073,7 +1498,6 @@ async fn main() {
                         match ctx.unwrap_and_process_welcome(&ev).await {
                             Ok(Some(w)) => println!("kind=444 welcome, nostr_group={}", hex::encode(w.nostr_group_id)),
                             Ok(None) => {
-                                // Not a welcome — try unwrapping manually to see the inner kind
                                 match nostr::nips::nip59::extract_rumor(&ctx.identity.keys, ev).await {
                                     Ok(unwrapped) => println!("kind={} (not a welcome)", unwrapped.rumor.kind),
                                     Err(e) => println!("unwrap failed: {e}"),
@@ -1087,7 +1511,6 @@ async fn main() {
             }
             println!();
 
-            // 3. Gift wraps published BY the target (to find what they sent us)
             println!("--- Gift wraps authored by target (kind 1059) ---");
             let filter = nostr::Filter::new()
                 .kind(nostr::Kind::GiftWrap)
@@ -1107,17 +1530,14 @@ async fn main() {
             }
             println!();
 
-            // 4. All events on relay for shared groups (by h-tag)
             println!("--- Events on relay for shared groups ---");
             match ctx.list_groups() {
                 Ok(groups) => {
-                    // Only check groups that involve the target pubkey (name contains their hex)
                     let target_short = &target_hex[..16];
                     let relevant: Vec<_> = groups.iter()
                         .filter(|g| g.name.contains(target_short) || g.name.contains(&target_hex))
                         .collect();
                     if relevant.is_empty() {
-                        // Fall back: show all groups
                         for g in &groups {
                             println!("  {} ({})", hex::encode(g.nostr_group_id), g.name);
                         }
@@ -1153,5 +1573,14 @@ async fn main() {
                 Err(e) => eprintln!("  {e}"),
             }
         }
+    }
+}
+
+fn parse_optional_event_id(s: Option<&str>) -> anyhow::Result<Option<EventId>> {
+    match s {
+        None => Ok(None),
+        Some(id_str) => EventId::parse(id_str)
+            .map(Some)
+            .map_err(|e| anyhow::anyhow!("Invalid event ID '{}': {e}", id_str)),
     }
 }

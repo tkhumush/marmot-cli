@@ -10,8 +10,10 @@
 
 - Identity: create, list, show, delete, set-default
 - KeyPackage: publish (kind 30443), show
-- DM: create (deduplicates — reuses existing group if recipient already has one), list (shows peer npub), send, messages
-- Groups: create, invite, list, members, messages, pending, join (bulk-accept)
+- DM: create (deduplicates — reuses existing group if recipient already has one), list (shows peer npub), send (with `--reply-to`), messages
+- Groups: create (with `--description`), invite, list, members, messages, pending, join (bulk-accept)
+- Groups: show, send (with `--reply-to`), leave, decline, accept, rename, remove-members, promote, demote, self-demote
+- Messages: react (kind 7), delete (kind 5)
 - Receive: fetches kind 445/10449/4459 + kind 1059 gift-wraps; decrypts and stores all
 - Relay: list default relays
 - Daemon: TCP JSON-RPC skeleton (`ping` live; other methods are stubs)
@@ -22,25 +24,25 @@
 ## 🔴 High Priority — Core Messaging Completeness
 
 ### Group lifecycle
-- [ ] `groups leave <group_id>` — publish a SelfRemove proposal + leave locally
-- [ ] `groups decline <group_id>` — decline a pending invitation (mark locally; no relay action needed)
-- [ ] `groups accept <group_id>` — accept a single named invitation (currently `groups join` accepts all pending)
-- [ ] `groups rename <group_id> <name>` — update NostrGroupDataExtension name via GroupContextExtensions commit
-- [ ] `groups remove-members <group_id> <npubs...>` — admin removes one or more members
-- [ ] `groups promote <group_id> <pubkey>` — add pubkey to admin list in extension
-- [ ] `groups demote <group_id> <pubkey>` — remove pubkey from admin list in extension
-- [ ] `groups self-demote <group_id>` — remove self from admin list (required before leaving if admin)
-- [ ] `groups show <group_id>` — show full group metadata: name, description, admins, relays, epoch, state, member count
+- [x] `groups leave <group_id>` — publish a SelfRemove proposal + leave locally
+- [x] `groups decline <group_id>` — decline a pending invitation (mark locally; no relay action needed)
+- [x] `groups accept <group_id>` — accept a single named invitation (currently `groups join` accepts all pending)
+- [x] `groups rename <group_id> <name>` — update NostrGroupDataExtension name via GroupContextExtensions commit
+- [x] `groups remove-members <group_id> <npubs...>` — admin removes one or more members
+- [x] `groups promote <group_id> <pubkey>` — add pubkey to admin list in extension
+- [x] `groups demote <group_id> <pubkey>` — remove pubkey from admin list in extension
+- [x] `groups self-demote <group_id>` — remove self from admin list (required before leaving if admin)
+- [x] `groups show <group_id>` — show full group metadata: name, admins, relays, member count
 
 ### Message operations
-- [ ] `--reply-to <message_id>` flag on `dm send` and `groups messages send` — include reply thread tag
-- [ ] `messages delete <group_id> <event_id>` — publish kind 5 deletion event
-- [ ] `messages react <group_id> <message_id> [--emoji <char>]` — send kind 7 reaction (inner rumor)
+- [x] `--reply-to <message_id>` flag on `dm send` and `groups send` — include reply thread tag
+- [x] `messages delete <group_id> <event_id>` — publish kind 5 deletion event
+- [x] `messages react <group_id> <message_id> [--emoji <char>]` — send kind 7 reaction (inner rumor)
 - [ ] `messages unreact <group_id> <message_id>` — remove own reaction
 - [ ] `messages retry <group_id> <event_id>` — re-send a failed message as a new event
 
 ### Groups create — missing options
-- [ ] `--description <text>` flag for `groups create`
+- [x] `--description <text>` flag for `groups create`
 - [ ] `--members <npubs...>` flag for `groups create` — create group with initial members in one step (fetch their KeyPackages, add all, send welcome to each)
 
 ---
