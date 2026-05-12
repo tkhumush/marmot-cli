@@ -58,6 +58,21 @@ enum Commands {
         #[command(subcommand)]
         action: ProfileAction,
     },
+    /// Look up a user's profile by npub.
+    Users {
+        #[command(subcommand)]
+        action: UsersAction,
+    },
+    /// Manage your follow list (kind 3 contact list).
+    Follows {
+        #[command(subcommand)]
+        action: FollowsAction,
+    },
+    /// Unified view of all conversations (DMs + groups).
+    Chats {
+        #[command(subcommand)]
+        action: ChatsAction,
+    },
     /// Fetch and decrypt incoming messages for all known groups.
     Receive {
         #[arg(short, long, help = "Max events to fetch per group", default_value = "50")]
@@ -100,8 +115,18 @@ enum IdentityAction {
 
 #[derive(Subcommand)]
 enum RelayAction {
+    /// Show all configured relay categories.
     List,
-    Add { url: String },
+    /// Add a relay to your inbox list (kind 10050) and republish.
+    Add {
+        #[arg(help = "Relay WebSocket URL (wss://...)")]
+        url: String,
+    },
+    /// Remove a relay from your inbox list (kind 10050) and republish.
+    Remove {
+        #[arg(help = "Relay WebSocket URL to remove")]
+        url: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -340,6 +365,40 @@ enum ProfileAction {
     },
 }
 
+#[derive(Subcommand)]
+enum UsersAction {
+    /// Fetch and display a user's Nostr profile from relays.
+    Show {
+        #[arg(help = "npub or hex pubkey")]
+        npub: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum FollowsAction {
+    /// List accounts you follow (kind 3 contact list).
+    List,
+    /// Follow a user — adds them to your kind 3 contact list.
+    Add {
+        #[arg(help = "npub or hex pubkey to follow")]
+        npub: String,
+    },
+    /// Unfollow a user — removes them from your kind 3 contact list.
+    Remove {
+        #[arg(help = "npub or hex pubkey to unfollow")]
+        npub: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ChatsAction {
+    /// Unified view of all conversations with last-message preview.
+    List {
+        #[arg(short, long, help = "Max conversations to show", default_value = "50")]
+        limit: usize,
+    },
+}
+
 async fn load_storage() -> Option<marmot_agent_core::storage::AgentStorage> {
     match marmot_agent_core::storage::AgentStorage::init().await {
         Ok(s) => Some(s),
@@ -483,13 +542,122 @@ async fn main() {
         },
         Commands::Relay { action } => match action {
             RelayAction::List => {
-                println!("Default relays:");
+                println!("Default relays (built-in):");
                 for url in marmot_agent_core::relay::DEFAULT_RELAYS {
                     println!("  {}", url);
                 }
+
+                // Show inbox relays (kind 10050) if identity is set
+                if let Some(ctx) = load_default_context().await {
+                    let our_pk = ctx.identity.keys.public_key();
+
+                    let inbox = marmot_agent_core::relay::fetch_inbox_relays(
+                        our_pk,
+                        &marmot_agent_core::relay::DEFAULT_RELAYS,
+                    ).await;
+                    println!("\nInbox relays (kind 10050 — where others send gift-wraps to you):");
+                    if inbox.is_empty() {
+                        println!("  (none published — run 'keypackage publish' to set them)");
+                    } else {
+                        for r in &inbox {
+                            println!("  {}", r);
+                        }
+                    }
+
+                    // Show NIP-65 relay list (kind 10002)
+                    let filter = nostr::Filter::new()
+                        .kind(nostr::Kind::RelayList)
+                        .author(our_pk)
+                        .limit(1);
+                    if let Ok(events) = marmot_agent_core::relay::fetch_raw(filter, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
+                        println!("\nNIP-65 relay list (kind 10002):");
+                        if let Some(ev) = events.into_iter().next() {
+                            for tag in ev.tags.iter() {
+                                if tag.kind() == nostr::TagKind::SingleLetter(nostr::SingleLetterTag::lowercase(nostr::Alphabet::R)) {
+                                    let parts: Vec<_> = tag.as_slice().iter().skip(1).collect();
+                                    println!("  {}", parts.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" "));
+                                }
+                            }
+                        } else {
+                            println!("  (none published)");
+                        }
+                    }
+                }
             }
             RelayAction::Add { url } => {
-                println!("Adding relay {}... (not yet implemented)", url);
+                let Some(ctx) = load_default_context().await else { return; };
+
+                let our_pk = ctx.identity.keys.public_key();
+                let existing_inbox = marmot_agent_core::relay::fetch_inbox_relays(
+                    our_pk,
+                    &marmot_agent_core::relay::DEFAULT_RELAYS,
+                ).await;
+
+                let mut relays = existing_inbox;
+                if relays.contains(&url) {
+                    println!("Relay '{}' is already in your inbox list.", url);
+                    return;
+                }
+                relays.push(url.clone());
+
+                let tags: Vec<nostr::Tag> = relays.iter()
+                    .filter_map(|r| nostr::RelayUrl::parse(r).ok())
+                    .map(nostr::Tag::relay)
+                    .collect();
+
+                let event = match nostr::EventBuilder::new(nostr::Kind::Custom(10050), "")
+                    .tags(tags)
+                    .sign_with_keys(&ctx.identity.keys)
+                {
+                    Ok(e) => e,
+                    Err(e) => { eprintln!("Failed to build relay list event: {e}"); return; }
+                };
+
+                match marmot_agent_core::relay::publish_event(&event, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
+                    Ok(results) => {
+                        let ok = results.iter().filter(|(_, ok)| *ok).count();
+                        println!("Relay '{}' added to inbox list: {}/{} relays OK", url, ok, results.len());
+                    }
+                    Err(e) => eprintln!("Publish failed: {e}"),
+                }
+            }
+            RelayAction::Remove { url } => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                let our_pk = ctx.identity.keys.public_key();
+                let existing_inbox = marmot_agent_core::relay::fetch_inbox_relays(
+                    our_pk,
+                    &marmot_agent_core::relay::DEFAULT_RELAYS,
+                ).await;
+
+                let before_len = existing_inbox.len();
+                let relays: Vec<String> = existing_inbox.into_iter().filter(|r| r != &url).collect();
+
+                if relays.len() == before_len {
+                    println!("Relay '{}' was not in your inbox list.", url);
+                    return;
+                }
+
+                let tags: Vec<nostr::Tag> = relays.iter()
+                    .filter_map(|r| nostr::RelayUrl::parse(r).ok())
+                    .map(nostr::Tag::relay)
+                    .collect();
+
+                let event = match nostr::EventBuilder::new(nostr::Kind::Custom(10050), "")
+                    .tags(tags)
+                    .sign_with_keys(&ctx.identity.keys)
+                {
+                    Ok(e) => e,
+                    Err(e) => { eprintln!("Failed to build relay list event: {e}"); return; }
+                };
+
+                match marmot_agent_core::relay::publish_event(&event, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
+                    Ok(results) => {
+                        let ok = results.iter().filter(|(_, ok)| *ok).count();
+                        println!("Relay '{}' removed from inbox list: {}/{} relays OK", url, ok, results.len());
+                    }
+                    Err(e) => eprintln!("Publish failed: {e}"),
+                }
             }
         },
         Commands::Keypackage { action } => match action {
@@ -535,6 +703,36 @@ async fn main() {
                 for (url, ok) in results {
                     let status = if ok { "OK" } else { "FAIL" };
                     println!("    {} {}", status, url);
+                }
+
+                // Also publish inbox relay list (kind 10050) if not already set.
+                // This is required so others know where to send gift-wrap welcome events.
+                let our_pk = ctx.identity.keys.public_key();
+                let existing_inbox = marmot_agent_core::relay::fetch_inbox_relays(
+                    our_pk,
+                    &marmot_agent_core::relay::DEFAULT_RELAYS,
+                ).await;
+                if existing_inbox.is_empty() {
+                    println!("\nPublishing inbox relay list (kind 10050)...");
+                    let inbox_tags: Vec<nostr::Tag> = marmot_agent_core::relay::DEFAULT_RELAYS.iter()
+                        .filter_map(|u| nostr::RelayUrl::parse(u).ok())
+                        .map(nostr::Tag::relay)
+                        .collect();
+                    if let Ok(inbox_event) = nostr::EventBuilder::new(nostr::Kind::Custom(10050), "")
+                        .tags(inbox_tags)
+                        .sign_with_keys(&ctx.identity.keys)
+                    {
+                        match marmot_agent_core::relay::publish_event(
+                            &inbox_event,
+                            &marmot_agent_core::relay::DEFAULT_RELAYS,
+                        ).await {
+                            Ok(r) => {
+                                let ok = r.iter().filter(|(_, ok)| *ok).count();
+                                println!("  Inbox relay list published: {}/{} relays OK", ok, r.len());
+                            }
+                            Err(e) => eprintln!("  Inbox relay list publish failed: {e}"),
+                        }
+                    }
                 }
             }
             KeypackageAction::Show => {
@@ -1738,6 +1936,256 @@ async fn main() {
                         println!("  Event ID: {}", event.id);
                     }
                     Err(e) => eprintln!("Publish failed: {e}"),
+                }
+            }
+        },
+        Commands::Users { action } => match action {
+            UsersAction::Show { npub } => {
+                let target_pk = match PublicKey::parse(&npub) {
+                    Ok(pk) => pk,
+                    Err(e) => { eprintln!("Invalid npub '{}': {e}", npub); return; }
+                };
+
+                let filter = nostr::Filter::new()
+                    .kind(nostr::Kind::Metadata)
+                    .author(target_pk)
+                    .limit(1);
+                println!("Fetching profile for {}...", npub);
+                match marmot_agent_core::relay::fetch_raw(filter, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
+                    Ok(events) => {
+                        if let Some(ev) = events.into_iter().next() {
+                            println!("Profile:");
+                            println!("  npub: {}", marmot_agent_core::context::AgentContext::member_npub(&target_pk));
+                            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&ev.content) {
+                                for field in &["name", "display_name", "about", "picture", "nip05", "lud16", "website"] {
+                                    if let Some(val) = meta.get(field).and_then(|v| v.as_str()) {
+                                        if !val.is_empty() {
+                                            println!("  {}: {}", field, val);
+                                        }
+                                    }
+                                }
+                            } else {
+                                println!("  (raw): {}", ev.content);
+                            }
+                        } else {
+                            println!("No profile found for {}.", npub);
+                        }
+                    }
+                    Err(e) => eprintln!("Failed to fetch profile: {e}"),
+                }
+            }
+        },
+        Commands::Follows { action } => match action {
+            FollowsAction::List => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                let filter = nostr::Filter::new()
+                    .kind(nostr::Kind::ContactList)
+                    .author(ctx.identity.keys.public_key())
+                    .limit(1);
+                println!("Fetching follow list from relays...");
+                match marmot_agent_core::relay::fetch_raw(filter, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
+                    Ok(events) => {
+                        if let Some(ev) = events.into_iter().next() {
+                            let follows: Vec<PublicKey> = ev.tags.iter()
+                                .filter(|t| t.kind() == nostr::TagKind::p())
+                                .filter_map(|t| t.content().and_then(|s| PublicKey::parse(s).ok()))
+                                .collect();
+                            if follows.is_empty() {
+                                println!("Follow list is empty.");
+                            } else {
+                                println!("Following ({}):", follows.len());
+                                for pk in follows {
+                                    println!("  {}", marmot_agent_core::context::AgentContext::member_npub(&pk));
+                                }
+                            }
+                        } else {
+                            println!("No follow list found. Use 'follows add <npub>' to start following.");
+                        }
+                    }
+                    Err(e) => eprintln!("Failed to fetch follow list: {e}"),
+                }
+            }
+            FollowsAction::Add { npub } => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                let new_pk = match PublicKey::parse(&npub) {
+                    Ok(pk) => pk,
+                    Err(e) => { eprintln!("Invalid npub '{}': {e}", npub); return; }
+                };
+
+                let filter = nostr::Filter::new()
+                    .kind(nostr::Kind::ContactList)
+                    .author(ctx.identity.keys.public_key())
+                    .limit(1);
+                let existing_tags = marmot_agent_core::relay::fetch_raw(filter, &marmot_agent_core::relay::DEFAULT_RELAYS)
+                    .await
+                    .ok()
+                    .and_then(|evs| evs.into_iter().next())
+                    .map(|ev| ev.tags.into_iter().collect::<Vec<_>>())
+                    .unwrap_or_default();
+
+                let already_following = existing_tags.iter()
+                    .filter(|t| t.kind() == nostr::TagKind::p())
+                    .filter_map(|t| t.content().and_then(|s| PublicKey::parse(s).ok()))
+                    .any(|pk| pk == new_pk);
+
+                if already_following {
+                    println!("Already following {}.", npub);
+                    return;
+                }
+
+                let mut tags = existing_tags;
+                tags.push(nostr::Tag::public_key(new_pk));
+
+                let event = match nostr::EventBuilder::new(nostr::Kind::ContactList, "")
+                    .tags(tags)
+                    .sign_with_keys(&ctx.identity.keys)
+                {
+                    Ok(e) => e,
+                    Err(e) => { eprintln!("Failed to build contact list: {e}"); return; }
+                };
+
+                match marmot_agent_core::relay::publish_event(&event, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
+                    Ok(results) => {
+                        let ok = results.iter().filter(|(_, ok)| *ok).count();
+                        println!("Now following {}. Published: {}/{} relays OK", npub, ok, results.len());
+                    }
+                    Err(e) => eprintln!("Publish failed: {e}"),
+                }
+            }
+            FollowsAction::Remove { npub } => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                let target_pk = match PublicKey::parse(&npub) {
+                    Ok(pk) => pk,
+                    Err(e) => { eprintln!("Invalid npub '{}': {e}", npub); return; }
+                };
+
+                let filter = nostr::Filter::new()
+                    .kind(nostr::Kind::ContactList)
+                    .author(ctx.identity.keys.public_key())
+                    .limit(1);
+                let existing_tags = marmot_agent_core::relay::fetch_raw(filter, &marmot_agent_core::relay::DEFAULT_RELAYS)
+                    .await
+                    .ok()
+                    .and_then(|evs| evs.into_iter().next())
+                    .map(|ev| ev.tags.into_iter().collect::<Vec<_>>())
+                    .unwrap_or_default();
+
+                let before_len = existing_tags.len();
+                let tags: Vec<nostr::Tag> = existing_tags.into_iter()
+                    .filter(|t| {
+                        if t.kind() == nostr::TagKind::p() {
+                            t.content().and_then(|s| PublicKey::parse(s).ok())
+                                .map(|pk| pk != target_pk)
+                                .unwrap_or(true)
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
+
+                if tags.len() == before_len {
+                    println!("Not currently following {}.", npub);
+                    return;
+                }
+
+                let event = match nostr::EventBuilder::new(nostr::Kind::ContactList, "")
+                    .tags(tags)
+                    .sign_with_keys(&ctx.identity.keys)
+                {
+                    Ok(e) => e,
+                    Err(e) => { eprintln!("Failed to build contact list: {e}"); return; }
+                };
+
+                match marmot_agent_core::relay::publish_event(&event, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
+                    Ok(results) => {
+                        let ok = results.iter().filter(|(_, ok)| *ok).count();
+                        println!("Unfollowed {}. Published: {}/{} relays OK", npub, ok, results.len());
+                    }
+                    Err(e) => eprintln!("Publish failed: {e}"),
+                }
+            }
+        },
+        Commands::Chats { action } => match action {
+            ChatsAction::List { limit } => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                let groups = match ctx.list_groups() {
+                    Ok(g) => g,
+                    Err(e) => { eprintln!("Failed to list groups: {e}"); return; }
+                };
+
+                if groups.is_empty() {
+                    println!("No conversations found.");
+                    return;
+                }
+
+                struct ChatPreview {
+                    display_name: String,
+                    nostr_id: String,
+                    last_ts: u64,
+                    last_sender: String,
+                    last_content: String,
+                }
+
+                let mut previews: Vec<ChatPreview> = vec![];
+                for g in groups.iter().take(limit) {
+                    let display_name = if g.name.is_empty() {
+                        let peer = ctx.get_members_for_group(&g.mls_group_id).ok()
+                            .and_then(|members| {
+                                members.into_iter()
+                                    .find(|pk| pk != &ctx.identity.keys.public_key())
+                                    .map(|pk| marmot_agent_core::context::AgentContext::member_npub(&pk))
+                            });
+                        match peer {
+                            Some(p) => {
+                                let truncated = &p[..std::cmp::min(p.len(), 20)];
+                                format!("<DM with {}>", truncated)
+                            }
+                            None => "<Direct Message>".to_string(),
+                        }
+                    } else {
+                        g.name.clone()
+                    };
+
+                    let (last_ts, last_sender, last_content) =
+                        if let Ok(msgs) = ctx.get_messages_for_group(&g.mls_group_id, 1) {
+                            if let Some(msg) = msgs.first() {
+                                let sender = marmot_agent_core::context::AgentContext::member_npub(&msg.pubkey);
+                                let preview: String = msg.content.chars().take(60).collect();
+                                let preview = if msg.content.len() > 60 { format!("{}…", preview) } else { preview };
+                                let ts = msg.created_at.as_secs();
+                                let sender_short = sender[..std::cmp::min(sender.len(), 16)].to_string();
+                                (ts, sender_short, preview)
+                            } else {
+                                (0u64, String::new(), "(no messages)".to_string())
+                            }
+                        } else {
+                            (0u64, String::new(), "(no messages)".to_string())
+                        };
+
+                    previews.push(ChatPreview {
+                        display_name,
+                        nostr_id: hex::encode(g.nostr_group_id),
+                        last_ts,
+                        last_sender,
+                        last_content,
+                    });
+                }
+
+                // Sort by most recent message first
+                previews.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
+
+                println!("Conversations ({}):", previews.len());
+                for p in &previews {
+                    if p.last_ts > 0 {
+                        println!("  '{}' ({})", p.display_name, p.nostr_id);
+                        println!("    [{}] {}: {}", p.last_ts, p.last_sender, p.last_content);
+                    } else {
+                        println!("  '{}' ({}) — no messages", p.display_name, p.nostr_id);
+                    }
                 }
             }
         },

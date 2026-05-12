@@ -9,13 +9,17 @@
 ## ✅ Already Implemented
 
 - Identity: create, list, show, delete, set-default
-- KeyPackage: publish (kind 30443), show
+- KeyPackage: publish (kind 30443), show, check, list, delete, delete-all
+- KeyPackage: auto-publishes kind 10050 inbox relay list on first publish
 - DM: create (deduplicates — reuses existing group if recipient already has one), list (shows peer npub), send (with `--reply-to`), messages
 - Groups: create (with `--description`, `--members` for batch invite), invite, list, members, messages, pending, join (bulk-accept)
 - Groups: show, send (with `--reply-to`), leave, decline, accept, rename, remove-members, promote, demote, self-demote
 - Messages: react (kind 7), delete (kind 5), search (per-group and cross-group)
-- KeyPackage: check (verify reachability), list (all on relays), delete, delete-all
 - Profile: show (fetch kind 0), update (publish kind 0)
+- Users: show (fetch any user's kind 0 profile)
+- Follows: list, add, remove (kind 3 contact list)
+- Chats: list (unified view with last-message preview)
+- Relay: list (shows default + inbox + NIP-65 lists), add/remove (updates kind 10050 inbox list)
 - Receive: fetches kind 445/10449/4459 + kind 1059 gift-wraps; decrypts and stores all
 - Relay: list default relays
 - Daemon: TCP JSON-RPC skeleton (`ping` live; other methods are stubs)
@@ -51,11 +55,12 @@
 
 ## 🟡 Medium Priority — Relay & Key Package Management
 
-### Relay management (currently only `relay list`)
-- [ ] `relays add <url> --type <inbox|key_package|nip65>` — add a relay URL to the specified list and publish updated kind 10050 / 10051 / 10002
-- [ ] `relays remove <url> --type <inbox|key_package|nip65>` — remove and republish
-- [ ] `relays list` — show all three relay categories (inbox, key_package, nip65) with connection status
-- [ ] Publish inbox relay list (kind 10050) on first run / identity creation — required so others can deliver gift-wraps
+### Relay management
+- [x] `relays list` — show default, inbox (kind 10050), and NIP-65 (kind 10002) relay categories
+- [x] `relays add <url>` — add to inbox relay list (kind 10050) and republish
+- [x] `relays remove <url>` — remove from inbox relay list and republish
+- [x] Publish inbox relay list (kind 10050) automatically on first `keypackage publish`
+- [ ] `relays add/remove --type key_package|nip65` — support other relay list types (kind 10051, 10002)
 - [ ] Publish key package relay list (kind 10051) on keypackage publish — currently not published
 
 ### Key package management
@@ -93,13 +98,13 @@ Once the daemon is fully wired (Phase 6), add scheduled maintenance loops:
 ## 🟢 Lower Priority — Social & Discovery
 
 ### User discovery
-- [ ] `users show <npub>` — fetch and display a user's Nostr profile from relays
+- [x] `users show <npub>` — fetch and display a user's Nostr profile from relays
 - [ ] `users search <query>` — search users by name across followed accounts and relays
 
 ### Follows (NIP-02)
-- [ ] `follows list` — list followed accounts (kind 3)
-- [ ] `follows add <npub>` — follow a user
-- [ ] `follows remove <npub>` — unfollow a user
+- [x] `follows list` — list followed accounts (kind 3)
+- [x] `follows add <npub>` — follow a user
+- [x] `follows remove <npub>` — unfollow a user
 
 ### Blocking (NIP-51 mute list)
 - [ ] `block add <npub>` — add to block list (private entry in kind 10000)
@@ -110,7 +115,7 @@ Once the daemon is fully wired (Phase 6), add scheduled maintenance loops:
 
 ## 🟢 Lower Priority — Chat Management
 
-- [ ] `chats list` — unified view of all conversations with last-message preview and unread counts (replaces separate `dm list` / `groups list`)
+- [x] `chats list` — unified view of all conversations with last-message preview (sorted by most recent)
 - [ ] `chats archive <group_id>` / `chats unarchive <group_id>` — hide/restore a conversation from the main list
 - [ ] `chats mute <group_id> <duration>` / `chats unmute <group_id>` — suppress notifications (durations: `1h`, `8h`, `1d`, `1w`, `forever`)
 - [ ] Unread count tracking — track last-read event ID per group; expose unread count in `dm list` / `groups list`
