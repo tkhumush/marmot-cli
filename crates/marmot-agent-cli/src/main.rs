@@ -3,6 +3,7 @@ use mdk_core::messages::MessageProcessingResult;
 use std::sync::Arc;
 use tracing::Level;
 use nostr::{EventId, PublicKey};
+use nostr_relay_pool::{RelayPool, RelayPoolNotification, RelayOptions, SubscribeOptions};
 
 #[derive(Parser)]
 #[command(name = "marmot-cli")]
@@ -37,9 +38,6 @@ enum Commands {
     Daemon {
         #[arg(short, long, default_value = "127.0.0.1:9222")]
         listen: String,
-        /// Seconds between automatic relay polls (0 = disabled).
-        #[arg(long, default_value = "30")]
-        poll_interval: u64,
     },
     /// Group management.
     Groups {
@@ -980,97 +978,108 @@ async fn main() {
                 println!("\nDone. Run 'keypackage publish' to republish a fresh one.");
             }
         },
-        Commands::Daemon { listen, poll_interval } => {
+        Commands::Daemon { listen } => {
             println!("Starting daemon on {}...", listen);
 
             // Capture the tokio Handle before entering spawn_blocking so we can
             // call async functions from within the blocking RPC handler threads.
             let rt_handle = tokio::runtime::Handle::current();
 
-            // Background receive loop: polls relays on a fixed interval so the
-            // daemon always has fresh messages without requiring manual `receive`.
-            if poll_interval > 0 {
-                let bg_handle = rt_handle.clone();
-                std::thread::spawn(move || {
-                    println!("Background receive loop active (every {}s).", poll_interval);
+            // Background subscription task: keeps a persistent WebSocket connection
+            // to relays and processes events in real-time as they are pushed.
+            //
+            // Runs on a dedicated OS thread with its own single-threaded tokio
+            // runtime so AgentContext doesn't need to be Send.
+            std::thread::spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("bg tokio runtime");
+
+                rt.block_on(async {
+                    let Some(ctx) = load_default_context().await else {
+                        eprintln!("bg-receive: no default identity — subscription not started");
+                        return;
+                    };
+                    let our_pk = ctx.identity.keys.public_key();
+
+                    // Build a persistent RelayPool — stays connected for the daemon lifetime.
+                    let pool = RelayPool::default();
+                    for url in marmot_agent_core::relay::DEFAULT_RELAYS {
+                        if let Ok(relay_url) = nostr::RelayUrl::parse(url) {
+                            let _ = pool.add_relay(relay_url, RelayOptions::default()).await;
+                        }
+                    }
+                    pool.connect().await;
+                    // Small pause for WebSocket handshakes to complete.
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+                    // Tap the notification channel BEFORE subscribing so we don't
+                    // miss any events that arrive between subscribe() returning and
+                    // the recv() loop starting.
+                    let mut notifications = pool.notifications();
+
+                    // Subscribe to:
+                    //   - kind 1059 gift wraps addressed to us (welcome messages)
+                    //   - kinds 445/10449/4459 MLS group events (all groups;
+                    //     process_incoming_event gracefully ignores unknown groups)
+                    let gift_wrap_filter = nostr::Filter::new()
+                        .kind(nostr::Kind::GiftWrap)
+                        .pubkey(our_pk);
+                    let group_filter = nostr::Filter::new()
+                        .kinds(vec![
+                            nostr::Kind::Custom(445),
+                            nostr::Kind::Custom(10449),
+                            nostr::Kind::Custom(4459),
+                        ]);
+
+                    match pool.subscribe(
+                        vec![gift_wrap_filter, group_filter],
+                        SubscribeOptions::default(),
+                    ).await {
+                        Ok(_) => println!("Live subscriptions active — events arrive in real-time."),
+                        Err(e) => {
+                            eprintln!("bg-receive: subscribe failed: {e}");
+                            return;
+                        }
+                    }
+
+                    // Process incoming events as the relay pushes them.
                     loop {
-                        bg_handle.block_on(async {
-                            let Some(ctx) = load_default_context().await else {
-                                tracing::warn!("bg-receive: no default identity, skipping poll");
-                                return;
-                            };
-
-                            let mut new_messages = 0usize;
-                            let mut new_welcomes = 0usize;
-
-                            // Fetch and process MLS group messages (kind 445 / 10449 / 4459)
-                            let groups = match ctx.list_groups() {
-                                Ok(g) => g,
-                                Err(e) => { tracing::warn!("bg-receive: list_groups failed: {e}"); return; }
-                            };
-                            let h_tags: Vec<String> = groups.iter()
-                                .map(|g| hex::encode(g.nostr_group_id))
-                                .collect();
-                            if !h_tags.is_empty() {
-                                match marmot_agent_core::relay::fetch_group_events(
-                                    &h_tags, 100, &marmot_agent_core::relay::DEFAULT_RELAYS,
-                                ).await {
-                                    Ok(evs) => {
-                                        for ev in &evs {
-                                            match ctx.process_incoming_event(ev) {
-                                                Ok(mdk_core::messages::MessageProcessingResult::ApplicationMessage(_)) => {
-                                                    new_messages += 1;
-                                                }
-                                                _ => {}
-                                            }
-                                        }
+                        match notifications.recv().await {
+                            Ok(RelayPoolNotification::Event { event, .. }) => {
+                                if event.kind == nostr::Kind::GiftWrap {
+                                    match ctx.unwrap_and_process_welcome(&event).await {
+                                        Ok(Some(w)) => tracing::info!(
+                                            "bg-receive: new group invitation ({})",
+                                            hex::encode(w.nostr_group_id)
+                                        ),
+                                        Ok(None) => {}
+                                        Err(e) => tracing::debug!("bg-receive: gift wrap: {e}"),
                                     }
-                                    Err(e) => tracing::warn!("bg-receive: fetch_group_events failed: {e}"),
-                                }
-                            }
-
-                            // Fetch and process gift wraps / welcome messages (kind 1059)
-                            let our_pk = ctx.identity.keys.public_key();
-                            let inbox = marmot_agent_core::relay::fetch_inbox_relays(
-                                our_pk,
-                                &marmot_agent_core::relay::DEFAULT_RELAYS,
-                            ).await;
-                            let mut fetch_relays: Vec<String> = marmot_agent_core::relay::DEFAULT_RELAYS
-                                .iter().map(|s| s.to_string()).collect();
-                            for r in inbox {
-                                if !fetch_relays.contains(&r) { fetch_relays.push(r); }
-                            }
-                            let fetch_relay_refs: Vec<&str> = fetch_relays.iter().map(|s| s.as_str()).collect();
-                            match marmot_agent_core::relay::fetch_gift_wrap_events(
-                                our_pk, &fetch_relay_refs,
-                            ).await {
-                                Ok(evs) => {
-                                    for ev in &evs {
-                                        match ctx.unwrap_and_process_welcome(ev).await {
-                                            Ok(Some(_)) => new_welcomes += 1,
-                                            _ => {}
+                                } else {
+                                    match ctx.process_incoming_event(&event) {
+                                        Ok(MessageProcessingResult::ApplicationMessage(_)) => {
+                                            tracing::info!("bg-receive: new message (event {})", &event.id.to_hex()[..12]);
                                         }
+                                        Ok(_) => {}
+                                        Err(e) => tracing::debug!("bg-receive: group event: {e}"),
                                     }
                                 }
-                                Err(e) => tracing::warn!("bg-receive: fetch_gift_wrap_events failed: {e}"),
                             }
-
-                            if new_messages > 0 || new_welcomes > 0 {
-                                tracing::info!(
-                                    "bg-receive: {} new message(s), {} new invitation(s)",
-                                    new_messages, new_welcomes
-                                );
-                            } else {
-                                tracing::debug!("bg-receive: no new events");
+                            Ok(RelayPoolNotification::Shutdown) => {
+                                println!("bg-receive: relay pool shut down");
+                                break;
                             }
-                        });
-
-                        std::thread::sleep(std::time::Duration::from_secs(poll_interval));
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!("bg-receive: notification channel error: {e}");
+                                break;
+                            }
+                        }
                     }
                 });
-            } else {
-                println!("Background polling disabled (--poll-interval 0).");
-            }
+            });
 
             let handler: marmot_agent_rpc::server::HandlerFn = Arc::new(
                 move |method: String, params: serde_json::Value| {

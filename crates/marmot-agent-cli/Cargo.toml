@@ -27,6 +27,7 @@ anyhow.workspace = true
 hex.workspace = true
 chrono.workspace = true
 nostr.workspace = true
+nostr-relay-pool.workspace = true
 mdk-core.workspace = true
 mdk-storage-traits.workspace = true
 

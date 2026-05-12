@@ -94,7 +94,7 @@ Remaining background maintenance loops (not yet scheduled):
 - [ ] Key package refresh — every 10 min: publish fresh packages, clean up consumed ones
 - [ ] Subscription health check — every 15 min: verify relay subscriptions are alive, rebuild if drifted
 - [ ] Relay list repair — every 30 min: detect and republish inbox/key-package relay lists that failed to publish at login
-- [x] Receive loop — `--poll-interval <secs>` flag on daemon (default 30s); background thread polls relays and processes messages/welcomes automatically
+- [x] Live receive loop — daemon keeps a persistent WebSocket subscription (kinds 445/10449/4459 + gift wraps); events are pushed in real-time, no polling
 
 ---
 
