@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use mdk_core::messages::MessageProcessingResult;
 use std::sync::Arc;
 use tracing::Level;
-use nostr::{EventId, PublicKey};
+use nostr::{Alphabet, EventId, PublicKey, SingleLetterTag};
 use nostr_relay_pool::{RelayPool, RelayPoolNotification, RelayOptions, SubscribeOptions};
 
 #[derive(Parser)]
@@ -285,6 +285,11 @@ enum GroupAction {
         #[arg(long, help = "Publish the leave event to relays")]
         publish: bool,
     },
+    /// Delete a group from local storage only (no relay action). Use to remove stale groups.
+    DeleteLocal {
+        #[arg(short, long, help = "Group nostr ID (hex h-tag)")]
+        group: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -295,6 +300,8 @@ enum DmAction {
         recipient: String,
         #[arg(long, help = "Also publish the DM group creation events to relays")]
         publish: bool,
+        #[arg(long, help = "Create a new group even if a DM with this recipient already exists")]
+        force: bool,
     },
     /// List all conversation groups.
     List,
@@ -1003,41 +1010,73 @@ async fn main() {
                     };
                     let our_pk = ctx.identity.keys.public_key();
 
+                    // Collect h-tags for all currently known groups so the relay
+                    // can filter events for just our groups.
+                    let mut h_tags: Vec<String> = ctx.list_groups()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|g| hex::encode(g.nostr_group_id))
+                        .collect();
+
                     // Build a persistent RelayPool — stays connected for the daemon lifetime.
                     let pool = RelayPool::default();
+                    // Add default relays.
                     for url in marmot_agent_core::relay::DEFAULT_RELAYS {
                         if let Ok(relay_url) = nostr::RelayUrl::parse(url) {
                             let _ = pool.add_relay(relay_url, RelayOptions::default()).await;
                         }
                     }
+                    // Also add the identity's inbox relays (kind 10050) so we receive
+                    // gift-wrapped welcomes delivered there.
+                    let inbox_relays = marmot_agent_core::relay::fetch_inbox_relays(
+                        our_pk,
+                        &marmot_agent_core::relay::DEFAULT_RELAYS,
+                    ).await;
+                    for url in &inbox_relays {
+                        if let Ok(relay_url) = nostr::RelayUrl::parse(url.as_str()) {
+                            let _ = pool.add_relay(relay_url, RelayOptions::default()).await;
+                        }
+                    }
+
                     pool.connect().await;
                     // Small pause for WebSocket handshakes to complete.
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+                    // Helper: build the two filters and subscribe/re-subscribe.
+                    // Returns Err if subscribe fails.
+                    let build_and_subscribe = |_pool: &RelayPool, h_tags: &[String]| {
+                        let gift_wrap_filter = nostr::Filter::new()
+                            .kind(nostr::Kind::GiftWrap)
+                            .pubkey(our_pk);
+                        // Filter group events by our group h-tags so the relay only
+                        // sends events relevant to groups we are actually a member of.
+                        let mut group_filter = nostr::Filter::new()
+                            .kinds(vec![
+                                nostr::Kind::Custom(445),
+                                nostr::Kind::Custom(10449),
+                                nostr::Kind::Custom(4459),
+                            ]);
+                        if !h_tags.is_empty() {
+                            group_filter = group_filter.custom_tags(
+                                SingleLetterTag::lowercase(Alphabet::H),
+                                h_tags.iter().cloned(),
+                            );
+                        }
+                        (gift_wrap_filter, group_filter)
+                    };
+
+                    let (gift_wrap_filter, group_filter) = build_and_subscribe(&pool, &h_tags);
 
                     // Tap the notification channel BEFORE subscribing so we don't
                     // miss any events that arrive between subscribe() returning and
                     // the recv() loop starting.
                     let mut notifications = pool.notifications();
 
-                    // Subscribe to:
-                    //   - kind 1059 gift wraps addressed to us (welcome messages)
-                    //   - kinds 445/10449/4459 MLS group events (all groups;
-                    //     process_incoming_event gracefully ignores unknown groups)
-                    let gift_wrap_filter = nostr::Filter::new()
-                        .kind(nostr::Kind::GiftWrap)
-                        .pubkey(our_pk);
-                    let group_filter = nostr::Filter::new()
-                        .kinds(vec![
-                            nostr::Kind::Custom(445),
-                            nostr::Kind::Custom(10449),
-                            nostr::Kind::Custom(4459),
-                        ]);
-
                     match pool.subscribe(
                         vec![gift_wrap_filter, group_filter],
                         SubscribeOptions::default(),
                     ).await {
-                        Ok(_) => println!("Live subscriptions active — events arrive in real-time."),
+                        Ok(_) => println!("Live subscriptions active ({} group(s)) — events arrive in real-time.", h_tags.len()),
                         Err(e) => {
                             eprintln!("bg-receive: subscribe failed: {e}");
                             return;
@@ -1050,10 +1089,24 @@ async fn main() {
                             Ok(RelayPoolNotification::Event { event, .. }) => {
                                 if event.kind == nostr::Kind::GiftWrap {
                                     match ctx.unwrap_and_process_welcome(&event).await {
-                                        Ok(Some(w)) => tracing::info!(
-                                            "bg-receive: new group invitation ({})",
-                                            hex::encode(w.nostr_group_id)
-                                        ),
+                                        Ok(Some(w)) => {
+                                            let h = hex::encode(w.nostr_group_id);
+                                            tracing::info!("bg-receive: new group invitation ({})", h);
+                                            // Update subscription to include the new group's h-tag
+                                            // so we receive its MLS events going forward.
+                                            if !h_tags.contains(&h) {
+                                                h_tags.push(h);
+                                                let (gw, grp) = build_and_subscribe(&pool, &h_tags);
+                                                if let Err(e) = pool.subscribe(
+                                                    vec![gw, grp],
+                                                    SubscribeOptions::default(),
+                                                ).await {
+                                                    tracing::warn!("bg-receive: re-subscribe failed: {e}");
+                                                } else {
+                                                    tracing::info!("bg-receive: re-subscribed with {} group(s)", h_tags.len());
+                                                }
+                                            }
+                                        }
                                         Ok(None) => {}
                                         Err(e) => tracing::debug!("bg-receive: gift wrap: {e}"),
                                     }
@@ -1165,7 +1218,7 @@ async fn main() {
                                 let mut new_welcomes = 0usize;
 
                                 if !h_tags.is_empty() {
-                                    if let Ok(evs) = marmot_agent_core::relay::fetch_group_events(
+                                    if let Ok(evs) = marmot_agent_core::relay::fetch_group_events_per_group(
                                         &h_tags, 50, &marmot_agent_core::relay::DEFAULT_RELAYS,
                                     ).await {
                                         for ev in &evs {
@@ -1824,9 +1877,23 @@ async fn main() {
                     }
                 }
             }
+            GroupAction::DeleteLocal { group } => {
+                let Some(ctx) = load_default_context().await else { return; };
+
+                let g = match ctx.find_group_by_nostr_id(&group) {
+                    Ok(Some(g)) => g,
+                    Ok(None) => { eprintln!("Group '{}' not found.", group); return; }
+                    Err(e) => { eprintln!("error: {e}"); return; }
+                };
+
+                match ctx.delete_group(&g.mls_group_id) {
+                    Ok(()) => println!("Deleted group '{}' from local storage.", g.name),
+                    Err(e) => eprintln!("Delete failed: {e}"),
+                }
+            }
         },
         Commands::Dm { action } => match action {
-            DmAction::Create { recipient, publish } => {
+            DmAction::Create { recipient, publish, force } => {
                 let Some(ctx) = load_default_context().await else { return; };
 
                 let recipient_pk = match PublicKey::parse(&recipient) {
@@ -1838,10 +1905,13 @@ async fn main() {
                 };
 
                 // Reuse an existing DM group if one already exists with this recipient.
-                if let Ok(Some(existing)) = ctx.find_dm_with_peer(&recipient_pk) {
-                    println!("DM with this recipient already exists — reusing it.");
-                    println!("  nostr-id: {}", hex::encode(existing.nostr_group_id));
-                    return;
+                if !force {
+                    if let Ok(Some(existing)) = ctx.find_dm_with_peer(&recipient_pk) {
+                        println!("DM with this recipient already exists — reusing it.");
+                        println!("  nostr-id: {}", hex::encode(existing.nostr_group_id));
+                        println!("  (use --force to create a fresh group and re-send the welcome)");
+                        return;
+                    }
                 }
 
                 println!("Fetching KeyPackage for {}...", recipient);
@@ -2718,7 +2788,7 @@ async fn main() {
             } else if h_tags.is_empty() {
                 vec![]
             } else {
-                match marmot_agent_core::relay::fetch_group_events(
+                match marmot_agent_core::relay::fetch_group_events_per_group(
                     &h_tags,
                     limit,
                     &marmot_agent_core::relay::DEFAULT_RELAYS,
@@ -2849,11 +2919,11 @@ async fn main() {
             }
             println!();
 
-            println!("--- Gift wraps addressed to us (kind 1059) ---");
+            println!("--- Gift wraps addressed to TARGET (kind 1059) ---");
             let filter = nostr::Filter::new()
                 .kind(nostr::Kind::GiftWrap)
-                .pubkey(our_pk)
-                .limit(50);
+                .pubkey(target_pk)
+                .limit(200);
             match marmot_agent_core::relay::fetch_raw(filter, &marmot_agent_core::relay::DEFAULT_RELAYS).await {
                 Ok(events) => {
                     if events.is_empty() {

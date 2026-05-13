@@ -68,11 +68,24 @@ pub async fn publish_gift_wrap(
             pool.connect().await;
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             match pool.send_event(event).await {
-                Ok(_) => {
-                    info!("gift-wrap published to inbox relays: {}", event.id);
-                    let results = inbox_relays.iter().map(|u| (u.clone(), true)).collect();
+                Ok(output) if !output.success.is_empty() => {
+                    info!("gift-wrap published to {} inbox relay(s): {}", output.success.len(), event.id);
+                    let results: Vec<(String, bool)> = inbox_relays.iter().map(|u| {
+                        let ok = nostr::RelayUrl::parse(u)
+                            .map(|ru| output.success.contains(&ru))
+                            .unwrap_or(false);
+                        if !ok { warn!("inbox relay rejected gift-wrap: {}", u); }
+                        (u.clone(), ok)
+                    }).collect();
                     pool.disconnect().await;
                     return Ok(results);
+                }
+                Ok(output) => {
+                    // All inbox relays rejected — log failures and fall through.
+                    for (url, msg) in &output.failed {
+                        warn!("inbox relay {} rejected gift-wrap: {}", url, msg);
+                    }
+                    warn!("gift-wrap rejected by all inbox relays, falling back to default relays");
                 }
                 Err(e) => {
                     warn!("gift-wrap inbox publish failed ({}), falling back", e);
@@ -115,10 +128,18 @@ pub async fn publish_event(
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     match pool.send_event(event).await {
-        Ok(_) => {
-            info!("event published: {}", event.id);
+        Ok(output) => {
+            if !output.success.is_empty() {
+                info!("event published to {} relay(s): {}", output.success.len(), event.id);
+            }
+            for (url, _) in &output.failed {
+                warn!("relay {} rejected event {}", url, event.id);
+            }
             for url in relays {
-                results.push((url.to_string(), true));
+                let ok = nostr::RelayUrl::parse(url)
+                    .map(|ru| output.success.contains(&ru))
+                    .unwrap_or(false);
+                results.push((url.to_string(), ok));
             }
         }
         Err(e) => {
@@ -166,9 +187,19 @@ pub async fn publish_events<'a>(
 
     for (label, event) in events {
         match pool.send_event(event).await {
-            Ok(_) => {
-                info!("{} published: {}", label, event.id);
-                let sub_results = relays.iter().map(|url| (url.to_string(), true)).collect();
+            Ok(output) => {
+                if !output.success.is_empty() {
+                    info!("{} published to {} relay(s): {}", label, output.success.len(), event.id);
+                }
+                for (url, msg) in &output.failed {
+                    warn!("{} rejected by {}: {}", label, url, msg);
+                }
+                let sub_results: Vec<(String, bool)> = relays.iter().map(|url| {
+                    let ok = nostr::RelayUrl::parse(url)
+                        .map(|ru| output.success.contains(&ru))
+                        .unwrap_or(false);
+                    (url.to_string(), ok)
+                }).collect();
                 all_results.push((*label, sub_results));
             }
             Err(e) => {
@@ -271,6 +302,59 @@ pub async fn fetch_group_events(
     let mut seen = std::collections::HashSet::new();
     all_events.retain(|ev| seen.insert(ev.id));
     // Sort newest first
+    all_events.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    Ok(all_events)
+}
+
+/// Fetch group events with a guaranteed per-group limit.
+/// Issues one subscription per group within a single pool connection so a busy group
+/// cannot crowd out a quieter one (unlike `fetch_group_events` which uses one filter).
+pub async fn fetch_group_events_per_group(
+    h_tags: &[String],
+    per_group_limit: usize,
+    relays: &[&str],
+) -> Result<Vec<Event>> {
+    if h_tags.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let pool = RelayPool::default();
+    for url in relays {
+        match RelayUrl::parse(url) {
+            Ok(relay_url) => {
+                if let Err(e) = pool.add_relay(relay_url, RelayOptions::default()).await {
+                    warn!("failed to add relay {}: {}", url, e);
+                }
+            }
+            Err(e) => warn!("invalid relay URL {}: {}", url, e),
+        }
+    }
+    pool.connect().await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let mut all_events = Vec::new();
+
+    for h_tag in h_tags {
+        let filter = Filter::new()
+            .kinds(vec![Kind::Custom(445), Kind::Custom(10449), Kind::Custom(4459)])
+            .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [h_tag.clone()])
+            .limit(per_group_limit);
+
+        match pool.fetch_events(
+            vec![filter],
+            std::time::Duration::from_secs(5),
+            ReqExitPolicy::ExitOnEOSE,
+        ).await {
+            Ok(events) => all_events.extend(events.into_iter()),
+            Err(e) => warn!("Failed to fetch events for group {}: {}", h_tag, e),
+        }
+    }
+
+    pool.disconnect().await;
+
+    let mut seen = std::collections::HashSet::new();
+    all_events.retain(|ev| seen.insert(ev.id));
     all_events.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
     Ok(all_events)

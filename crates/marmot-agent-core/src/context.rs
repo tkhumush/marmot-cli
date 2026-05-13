@@ -363,11 +363,13 @@ impl AgentContext {
         rumor: UnsignedEvent,
         recipient: &PublicKey,
     ) -> Result<Event> {
+        // NIP-40: ~30-day expiration matches White Noise's gift-wrap format.
+        let expiry = nostr::Timestamp::from_secs(nostr::Timestamp::now().as_secs() + 30 * 24 * 3600);
         nostr::event::builder::EventBuilder::gift_wrap(
             &self.identity.keys,
             recipient,
             rumor,
-            [],
+            [nostr::Tag::expiration(expiry)],
         )
         .await
         .map_err(|e| crate::Error::Group(format!("gift_wrap failed: {}", e)))

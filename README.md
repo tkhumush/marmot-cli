@@ -8,7 +8,7 @@ Uses [MLS (RFC 9420)](https://www.rfc-editor.org/rfc/rfc9420.html) for encryptio
 
 ## Status
 
-**CLI-complete.** All core messaging flows are implemented and interoperability with [White Noise](https://github.com/marmot-protocol/whitenoise) is confirmed — two-way MLS-encrypted messaging works end-to-end. Invoke via subprocess (signal-cli style) or use the JSON-RPC daemon (ping live; other methods are stubs and the next development phase).
+**CLI-complete.** All core messaging flows are implemented and interoperability with [White Noise](https://github.com/marmot-protocol/whitenoise) is confirmed — two-way MLS-encrypted messaging works end-to-end. Invoke via subprocess (signal-cli style) or drive via the JSON-RPC daemon (all core methods live).
 
 ## Install
 
@@ -142,39 +142,54 @@ marmot-cli daemon [--listen 127.0.0.1:9222]
 
 Starts a JSON-RPC TCP server (newline-delimited JSON, one object per line).
 
-**Currently live:** `ping`
+**Live methods:**
 
-**Stubs (not yet wired):** `identity_npub`, `list_groups`, `send_message`
+| Method | Params | Returns |
+|--------|--------|---------|
+| `ping` | — | `{ pong: true }` |
+| `identity_npub` | — | `{ npub: string }` |
+| `list_groups` | — | `{ groups: [{ nostr_id, name? }] }` |
+| `send_message` | `group_id`, `content`, `publish?` | `{ sent, event_id? }` |
+| `receive` | — | `{ new_messages, new_welcomes }` |
 
-**Planned methods:** `receive`, `get_messages`, `dm_create`, `groups_pending`, `groups_join`, `keypackage_publish`
+The daemon is the primary integration target for AI agent frameworks (OpenClaw, etc.). It keeps a single encrypted `AgentContext` loaded in memory and exposes all messaging operations over TCP — no subprocess overhead per call, no state reload, no relay reconnect. Any language that can open a TCP socket can drive it.
 
-The daemon is the primary integration target for AI agent frameworks (Hermes, OpenClaw, etc.). It keeps a single encrypted `AgentContext` loaded in memory and exposes all messaging operations over TCP — no subprocess overhead per call, no state reload, no relay reconnect. Any language that can open a TCP socket can drive it.
-
-See [`docs/HANDOFF.md`](docs/HANDOFF.md) for the full Phase 6 spec including the complete method table and wire format.
+**Relay publishing latency:** `send_message` publishes to relays before returning. damus.io can be slow (503s under load). Clients should use a minimum 30-second timeout for `send_message` calls.
 
 Quick test once the daemon is running:
 ```bash
 echo '{"jsonrpc":"2.0","method":"ping","id":1}' | nc 127.0.0.1 9222
-# → {"jsonrpc":"2.0","result":"pong","id":1}
+# → {"jsonrpc":"2.0","result":{"pong":true},"id":1}
+
+echo '{"jsonrpc":"2.0","method":"identity_npub","id":2}' | nc 127.0.0.1 9222
+# → {"jsonrpc":"2.0","result":{"npub":"npub1..."},"id":2}
 ```
 
-## Agent Integration (signal-cli style)
+## Agent Integration
 
-The recommended integration pattern until the daemon is complete is to invoke `marmot-cli` as a subprocess:
+**Recommended:** Use the JSON-RPC daemon. Start it once, keep it running, and drive all messaging over TCP. This avoids per-call state reload and relay reconnect overhead.
 
 ```bash
-# Poll for new messages (run on a schedule)
+# Start daemon
+marmot-cli daemon --listen 127.0.0.1:9222
+
+# Poll for new messages
+echo '{"jsonrpc":"2.0","method":"receive","id":1}' | nc 127.0.0.1 9222
+
+# Send a message (use ≥30s timeout — relay publishing can be slow)
+echo '{"jsonrpc":"2.0","method":"send_message","id":2,"params":{"group_id":"<hex>","content":"hello","publish":true}}' | nc 127.0.0.1 9222
+```
+
+The [openclaw-marmot](https://github.com/tkhumush/openclaw-marmot) plugin uses this pattern and provides a complete reference implementation.
+
+**Subprocess fallback (signal-cli style):** For one-shot scripts or languages without a TCP client:
+
+```bash
 marmot-cli receive --limit 100
-
-# Send a message
-marmot-cli dm send --group <hex> --message "agent reply here" --publish
-
-# Check for pending invitations and auto-accept
+marmot-cli dm send --group <hex> --message "agent reply" --publish
 marmot-cli groups pending
 marmot-cli groups join --publish
 ```
-
-Parse stdout line by line. All structured data (IDs, npubs, message content) appears on its own labeled line.
 
 ## Default Relays
 
@@ -190,7 +205,7 @@ Inherited from the [White Noise](https://github.com/marmot-protocol/whitenoise) 
 marmot-agent-cli        CLI entry point (clap)
 marmot-agent-core       Identity, storage, relay, AgentContext (MDK wrapper)
   └── mdk-core          Marmot Development Kit — MLS groups, encryption, Nostr events
-marmot-agent-rpc        JSON-RPC TCP server (ping live, rest are stubs)
+marmot-agent-rpc        JSON-RPC TCP server (ping, identity_npub, list_groups, send_message, receive)
 marmot-agent-ffi        Placeholder for FFI bindings
 ```
 
