@@ -1204,6 +1204,46 @@ async fn main() {
                             })
                         }
 
+                        "send_reaction" => {
+                            let group_id = params.get("group_id").and_then(|v| v.as_str()).map(str::to_string);
+                            let target_event_id = params.get("target_event_id").and_then(|v| v.as_str()).map(str::to_string);
+                            let emoji = params.get("emoji").and_then(|v| v.as_str()).map(str::to_string);
+                            let publish = params.get("publish").and_then(|v| v.as_bool()).unwrap_or(true);
+
+                            let (Some(group_id), Some(target_event_id), Some(emoji)) = (group_id, target_event_id, emoji) else {
+                                return Err("Missing required params: group_id, target_event_id, emoji".to_string());
+                            };
+
+                            handle.block_on(async move {
+                                let Some(ctx) = load_default_context().await else {
+                                    return Err("No default identity".to_string());
+                                };
+                                let g = match ctx.find_group_by_nostr_id(&group_id) {
+                                    Ok(Some(g)) => g,
+                                    Ok(None) => return Err(format!("Group '{}' not found", group_id)),
+                                    Err(e) => return Err(e.to_string()),
+                                };
+                                let target_id = match nostr::EventId::parse(&target_event_id) {
+                                    Ok(id) => id,
+                                    Err(e) => return Err(format!("Invalid target_event_id '{}': {}", target_event_id, e)),
+                                };
+                                match ctx.create_reaction(&g.mls_group_id, target_id, &emoji) {
+                                    Ok(event) => {
+                                        if publish {
+                                            let relays = ctx.get_group_relays(&g.mls_group_id).ok();
+                                            publish_message_event(&event, relays).await;
+                                        }
+                                        Ok(serde_json::json!({
+                                            "sent": true,
+                                            "event_id": event.id.to_hex(),
+                                            "published": publish,
+                                        }))
+                                    }
+                                    Err(e) => Err(e.to_string()),
+                                }
+                            })
+                        }
+
                         "receive" => {
                             handle.block_on(async {
                                 let Some(ctx) = load_default_context().await else {
@@ -1252,7 +1292,7 @@ async fn main() {
                 }
             );
 
-            println!("JSON-RPC methods: ping, identity_npub, list_groups, send_message, receive");
+            println!("JSON-RPC methods: ping, identity_npub, list_groups, send_message, send_reaction, receive");
             println!("Press Ctrl+C to stop.");
 
             match tokio::task::spawn_blocking(move || {
@@ -1577,8 +1617,9 @@ async fn main() {
                         } else {
                             println!("Messages in '{}' (newest first):", target_group.name);
                             for msg in &messages {
+                                if msg.kind.as_u16() != 9 { continue; }
                                 let sender = marmot_agent_core::context::AgentContext::member_npub(&msg.pubkey);
-                                println!("  [{}] {}: {}", msg.created_at, &sender[..16], msg.content);
+                                println!("  [{}] evid:{} {}: {}", msg.created_at, msg.id.to_hex(), &sender[..16], msg.content);
                             }
                             println!("  ({} messages)", messages.len());
                         }
@@ -2092,8 +2133,9 @@ async fn main() {
                         } else {
                             println!("Messages in '{}' (newest first):", display_name);
                             for msg in &messages {
+                                if msg.kind.as_u16() != 9 { continue; }
                                 let sender = marmot_agent_core::context::AgentContext::member_npub(&msg.pubkey);
-                                println!("  [{}] {}: {}", msg.created_at, &sender[..16], msg.content);
+                                println!("  [{}] evid:{} {}: {}", msg.created_at, msg.id.to_hex(), &sender[..16], msg.content);
                             }
                             println!("  ({} messages)", messages.len());
                         }
