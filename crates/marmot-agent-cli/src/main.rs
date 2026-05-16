@@ -1619,7 +1619,7 @@ async fn main() {
                             for msg in &messages {
                                 if msg.kind.as_u16() != 9 { continue; }
                                 let sender = marmot_agent_core::context::AgentContext::member_npub(&msg.pubkey);
-                                println!("  [{}] evid:{} {}: {}", msg.created_at, msg.id.to_hex(), &sender[..16], msg.content);
+                                println!("  [{}] evid:{} {}: {}", msg.created_at, msg.id.to_hex(), &sender, msg.content);
                             }
                             println!("  ({} messages)", messages.len());
                         }
@@ -2135,7 +2135,7 @@ async fn main() {
                             for msg in &messages {
                                 if msg.kind.as_u16() != 9 { continue; }
                                 let sender = marmot_agent_core::context::AgentContext::member_npub(&msg.pubkey);
-                                println!("  [{}] evid:{} {}: {}", msg.created_at, msg.id.to_hex(), &sender[..16], msg.content);
+                                println!("  [{}] evid:{} {}: {}", msg.created_at, msg.id.to_hex(), &sender, msg.content);
                             }
                             println!("  ({} messages)", messages.len());
                         }
@@ -2224,7 +2224,7 @@ async fn main() {
                             println!("Messages matching '{}' in '{}' ({} found):", query, group_name, hits.len());
                             for msg in hits {
                                 let sender = marmot_agent_core::context::AgentContext::member_npub(&msg.pubkey);
-                                println!("  [{}] {}: {}", msg.created_at, &sender[..16], msg.content);
+                                println!("  [{}] {}: {}", msg.created_at, &sender, msg.content);
                             }
                         }
                     }
@@ -2266,7 +2266,7 @@ async fn main() {
                             println!("\n  '{}' ({} match(es)):", group_name, hits.len());
                             for msg in hits {
                                 let sender = marmot_agent_core::context::AgentContext::member_npub(&msg.pubkey);
-                                println!("    [{}] {}: {}", msg.created_at, &sender[..16], msg.content);
+                                println!("    [{}] {}: {}", msg.created_at, &sender, msg.content);
                             }
                             total_hits += 1;
                         }
